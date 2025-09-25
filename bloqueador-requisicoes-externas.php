@@ -1,62 +1,105 @@
 <?php
 
 /**
- * Plugin Name: Bloqueador de Requisições Externas
- * Plugin URI: https://www.nw2web.com.br
- * Description: Bloqueia conexões externas desnecessárias e maliciosas, e otimiza o WooCommerce para uso como catálogo.
- * Author: Fausto - nw2web.com.br
- * Version: 1.6.2
+ * Plugin Name: Bloqueador de Requisições Externas (MU)
+ * Plugin URI:  https://www.nw2web.com.br
+ * Description: Bloqueia conexões externas indesejadas, entrega stubs locais p/ Elementor Home, libera Google Site Kit e Cloudflare, e otimiza WooCommerce para catálogo.
+ * Author:      Fausto - nw2web.com.br
+ * Version:     1.7.0
+ *
+ * Recomenda-se instalar como MU-plugin:
+ * wp-content/mu-plugins/bloqueador-requisicoes.php
  */
 
-// BLOQUEIO GLOBAL DE CONEXÕES EXTERNAS
-if (!defined('WP_HTTP_BLOCK_EXTERNAL')) {
+if (! defined('ABSPATH')) exit;
+
+/* ============================================================================
+ * 0) Recomendação MU (aviso leve se não estiver em mu-plugins)
+ * ========================================================================== */
+add_action('admin_init', function () {
+    $in_mu = (strpos(__DIR__, 'mu-plugins') !== false);
+    if (! $in_mu && current_user_can('manage_options')) {
+        add_action('admin_notices', function () {
+            echo '<div class="notice notice-warning"><p><strong>Bloqueador de Requisições Externas:</strong> recomenda-se mover este plugin para <code>wp-content/mu-plugins/</code> para impedir desativação acidental.</p></div>';
+        });
+    }
+});
+
+/* ============================================================================
+ * 1) Bloqueio global e lista de hosts permitidos (para requests legítimos)
+ * ========================================================================== */
+if (! defined('WP_HTTP_BLOCK_EXTERNAL')) {
     define('WP_HTTP_BLOCK_EXTERNAL', true);
 }
 
-// 1) Esconde a Home do Elementor (quando suportado)
+if (! defined('WP_ACCESSIBLE_HOSTS')) {
+    $hosts_permitidos = [
+        // WordPress core/updates
+        'api.wordpress.org',
+        'downloads.wordpress.org',
+
+        // Google / Site Kit (Analytics, Search Console, AdSense, Tag Manager, PSI)
+        '*.google.com',
+        '*.googleapis.com',
+        '*.gstatic.com',
+        'www.googletagmanager.com',
+        'sitekit.withgoogle.com',
+        'page-speed-insights.appspot.com',
+
+        // Elementor (apenas para que o nosso stub de rede possa interceptar)
+        'elementor.com',
+        'my.elementor.com',
+        'pro.elementor.com',
+        'elementor.cloud',
+        'assets.elementor.com',
+        'go.elementor.com',
+
+        // Cloudflare (plugin oficial / OAuth / API v4 / IP lists)
+        'api.cloudflare.com',
+        'dash.cloudflare.com',
+        'www.cloudflare.com',
+    ];
+    define('WP_ACCESSIBLE_HOSTS', implode(',', array_unique($hosts_permitidos)));
+}
+
+/* Força permissão explícita para Cloudflare mesmo com WP_HTTP_BLOCK_EXTERNAL */
+add_filter('http_request_host_is_external', function ($is_external, $host) {
+    if (preg_match('/(^|\.)cloudflare\.com$/i', (string)$host)) {
+        return true;
+    }
+    return $is_external;
+}, 10, 2);
+
+/* ============================================================================
+ * 2) Elementor Home — desabilitar UI e garantir dados seguros sem internet
+ * ========================================================================== */
+
+/* Esconde a Home do Elementor (quando suportado) */
 add_filter('elementor/admin/show_home_screen', '__return_false', 0);
 
-// 2) Remove o enqueue da Home (evita chamar Transformations_Manager)
+/* Remove o enqueue que inicializa a Home (evita Transformations_Manager) */
 add_action('elementor/init', function () {
-    if (!class_exists('\Elementor\Plugin')) return;
+    if (! class_exists('\Elementor\Plugin')) return;
     $plugin = \Elementor\Plugin::$instance;
+    if (! isset($plugin->modules_manager)) return;
 
-    if (!isset($plugin->modules_manager)) return;
-
-    $modules_manager = $plugin->modules_manager;
-
-    // Corrige a chamada do método com argumento vazio
-    if (method_exists($modules_manager, 'get_modules')) {
-        $modules = $modules_manager->get_modules([]);
-    } else {
-        $modules = [];
+    $modules = [];
+    if (method_exists($plugin->modules_manager, 'get_modules')) {
+        // Algumas versões aceitam 0 args; se não, trate como vazio
+        try {
+            $modules = $plugin->modules_manager->get_modules();
+        } catch (\Throwable $e) {
+            $modules = [];
+        }
     }
-
     if (isset($modules['home'])) {
         $home = $modules['home'];
-        remove_action('admin_print_scripts',  [$home, 'enqueue_home_screen_scripts']);
+        remove_action('admin_print_scripts',   [$home, 'enqueue_home_screen_scripts']);
         remove_action('admin_enqueue_scripts', [$home, 'enqueue_home_screen_scripts']);
     }
 }, 20);
 
-
-// 3) Fallback: se mesmo assim pedirem os itens, garante estrutura segura
-add_filter('elementor/home_screen/items', function ($data) {
-    if (!is_array($data)) $data = [];
-    $defaults = [
-        'add_ons'                    => ['repeater' => []],
-        'get_started'                => [],
-        'sidebar_promotion_variants' => [],
-        'top_with_licences'          => [],
-        'promotions'                 => [],
-        'banners'                    => [],
-        'cards'                      => [],
-        'items'                      => [],
-    ];
-    return array_replace_recursive($defaults, $data);
-}, 0);
-
-// 4) Stub de rede: qualquer request para elementor.* recebe JSON local válido
+/* Stub: qualquer chamada a elementor.* recebe JSON local consistente */
 add_filter('pre_http_request', function ($pre, $args, $url) {
     $host = parse_url($url, PHP_URL_HOST) ?: '';
     if (preg_match('~(^|\.)elementor\.(com|cloud)$~i', $host)) {
@@ -82,49 +125,43 @@ add_filter('pre_http_request', function ($pre, $args, $url) {
     return $pre;
 }, 0, 3);
 
-// 5) Define hosts permitidos para o stub funcionar antes do bloqueio global
-if (!defined('WP_ACCESSIBLE_HOSTS')) {
-    $hosts_permitidos = [
-        'api.wordpress.org',
-        'downloads.wordpress.org',
-        '*.google.com',
-        '*.googleapis.com',
-        '*.gstatic.com',
-        'www.googletagmanager.com',
-        'sitekit.withgoogle.com',
-        'page-speed-insights.appspot.com',
-        'elementor.com',
-        'my.elementor.com',
-        'pro.elementor.com',
-        'elementor.cloud',
-        'assets.elementor.com',
-        'go.elementor.com',
+/* Fallback: se algo ainda chamar os itens da Home, injeta esqueleto seguro */
+add_filter('elementor/home_screen/items', function ($data) {
+    if (!is_array($data)) $data = [];
+    $defaults = [
+        'add_ons'                    => ['repeater' => []],
+        'get_started'                => [],
+        'sidebar_promotion_variants' => [],
+        'top_with_licences'          => [],
+        'promotions'                 => [],
+        'banners'                    => [],
+        'cards'                      => [],
+        'items'                      => [],
     ];
-    define('WP_ACCESSIBLE_HOSTS', implode(',', array_unique($hosts_permitidos)));
-}
+    return array_replace_recursive($defaults, $data);
+}, 0);
 
-// 6) Limpa transients e opções antigos do Elementor
+/* Limpa transients/opções antigas da Home para evitar lixo com null */
 add_action('admin_init', function () {
-    $keys = [
-        'elementor_remote_info_api_data',
-        'e_home_screen_items',
-        'elementor_home_screen_items',
-        'elementor_remote_banners',
-    ];
-    foreach ($keys as $k) {
+    foreach (
+        [
+            'elementor_remote_info_api_data',
+            'e_home_screen_items',
+            'elementor_home_screen_items',
+            'elementor_remote_banners',
+        ] as $k
+    ) {
         delete_transient($k);
         delete_site_transient($k);
         delete_option($k);
     }
-
-    // Remove aviso do Jetpack (se existir)
-    if (class_exists('\Automattic\Jetpack\Jetpack')) {
-        remove_action('admin_notices', ['Automattic\Jetpack\Jetpack', 'admin_notice']);
-    }
 }, 20);
 
-// 7) BLOQUEIO DE REQUISIÇÕES EXTERNAS INDESEJADAS E MALICIOSAS
+/* ============================================================================
+ * 3) Bloqueio extra — blacklist de domínios indesejados/maliciosos
+ * ========================================================================== */
 add_filter('pre_http_request', function ($pre, $args, $url) {
+    // Respeita qualquer resposta já produzida por um stub anterior
     if ($pre !== false) return $pre;
 
     $bloqueios = [
@@ -178,11 +215,11 @@ add_filter('pre_http_request', function ($pre, $args, $url) {
         'gplplugins.club',
         'babia.to',
 
-        // Scanners
+        // scanners/serviços indesejados
         'wp-plugin.sucuri.net',
         'sitecheck.sucuri.net',
 
-        // Builders/temas
+        // builders/temas (updates externos não essenciais)
         'support.wpbakery.com',
         'sliderrevolution.com',
         'revslider',
@@ -193,6 +230,7 @@ add_filter('pre_http_request', function ($pre, $args, $url) {
         'bridge.qodeinteractive.com',
         'update.yithemes.com',
         'yithemes.com',
+        // OBS: não bloqueamos elementor.* aqui (stub já lida acima).
     ];
 
     foreach ($bloqueios as $dominio) {
@@ -206,7 +244,9 @@ add_filter('pre_http_request', function ($pre, $args, $url) {
     return $pre;
 }, 1, 3);
 
-// 8) OTIMIZAÇÕES PARA USO DO WOOCOMMERCE COMO CATÁLOGO
+/* ============================================================================
+ * 4) WooCommerce — otimizações para uso como catálogo
+ * ========================================================================== */
 add_action('init', function () {
     add_filter('woocommerce_admin_disabled', '__return_true');
     add_filter('woocommerce_allow_marketplace_suggestions', '__return_false');
@@ -220,3 +260,23 @@ add_action('wp_enqueue_scripts', function () {
     wp_dequeue_script('wc-checkout');
     wp_dequeue_script('wc-add-to-cart');
 }, 100);
+
+/* ============================================================================
+ * 5) (Opcional) Higiene de autoload em opções conhecidas (Elementor)
+ *    - impede que opções de licença/breakpoints entrem no autoload
+ * ========================================================================== */
+add_action('admin_init', function () {
+    global $wpdb;
+    $opts = [
+        '_elementor_pro_license_data',
+        '_elementor_pro_license_v2_data',
+        'elementor-custom-breakpoints-files',
+    ];
+    $placeholders = implode(',', array_fill(0, count($opts), '%s'));
+    $wpdb->query(
+        $wpdb->prepare(
+            "UPDATE {$wpdb->options} SET autoload='no' WHERE option_name IN ($placeholders)",
+            ...$opts
+        )
+    );
+}, 30);
