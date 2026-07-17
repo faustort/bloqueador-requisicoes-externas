@@ -4,7 +4,7 @@
  * Plugin URI:  https://www.nw2web.com.br
  * Description: Fail-fast inteligente + Default Deny. Google Site Kit 100% compatível. Elementor stub total. Cloudflare real. WooCommerce silencioso. Anti-curl nativo. Sem WP_HTTP_BLOCK_EXTERNAL.
  * Author:      Fausto — nw2web.com.br
- * Version:     2.9.0
+ * Version:     2.9.1
  *
  * Instale como MU-plugin: wp-content/mu-plugins/bloqueador-requisicoes.php
  */
@@ -308,15 +308,15 @@ add_action('init', function () {
 // }, 100);
 
 /* =============================================================================
- * 8) DEFAULT DENY — BLOQUEIO IMEDIATO DE NAO-WHITELISTADOS
- *    Este eh o "fail-fast global". Qualquer host externo que nao passou
+ * 8) DEFAULT DENY (OPT-IN) — BLOQUEIO IMEDIATO DE NAO-WHITELISTADOS
+ *    DESLIGADO por padrao — nao quebra atualizacoes, traducoes, oEmbed. Qualquer host externo que nao passou
  *    pelos bypasses acima (Google, CF, WP, SMTP, local) recebe WP_Error
  *    NA HORA, sem esperar timeout de 15s. Resolve o problema de plugins
  *    piratas que deixam o site LENTO tentando conectar para fora.
  *
- *    Para DESATIVAR: define('NW2_DEFAULT_DENY', false); no wp-config.php
+ *    Para ATIVAR: define('NW2_DEFAULT_DENY', true); no wp-config.php
  * ========================================================================== */
-if (!defined('NW2_DEFAULT_DENY')) define('NW2_DEFAULT_DENY', true);
+if (!defined('NW2_DEFAULT_DENY')) define('NW2_DEFAULT_DENY', false);
 
 if (NW2_DEFAULT_DENY) {
 	add_filter('pre_http_request', function ($pre, $args, $url) {
