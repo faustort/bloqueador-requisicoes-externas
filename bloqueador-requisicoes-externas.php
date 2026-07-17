@@ -2,9 +2,9 @@
 /**
  * Plugin Name: Bloqueador de Requisições Externas (MU) — NW2
  * Plugin URI:  https://www.nw2web.com.br
- * Description: Fail-fast inteligente para requisições externas. Google Site Kit 100% compatível. Elementor stub total. Cloudflare real. WooCommerce silencioso. Blacklist agressiva + WP-Cron bypass. Sem WP_HTTP_BLOCK_EXTERNAL.
+ * Description: Fail-fast inteligente + Default Deny. Google Site Kit 100% compatível. Elementor stub total. Cloudflare real. WooCommerce silencioso. Anti-curl nativo. Sem WP_HTTP_BLOCK_EXTERNAL.
  * Author:      Fausto — nw2web.com.br
- * Version:     2.8.0
+ * Version:     2.9.0
  *
  * Instale como MU-plugin: wp-content/mu-plugins/bloqueador-requisicoes.php
  */
@@ -110,21 +110,18 @@ add_action('admin_init', function () {
 
 /* =============================================================================
  * 1) BYPASS TOTAL — GOOGLE + CLOUDFLARE + LOCAL (ANTES DE TUDO)
- *    Este eh o segredo: se a URL eh Google/CF/WP/localhost, NUNCA bloqueia.
  *    O callback OAuth do Site Kit faz POST para sitekit.withgoogle.com
  *    e tambem para oauth2.googleapis.com — ambos passam aqui.
  * ========================================================================== */
 add_filter('pre_http_request', function ($pre, $args, $url) {
-	if (nw2_is_google_or_cf($url)) return false;   // Google, Cloudflare, WordPress.org
-	if (nw2_is_local_request($url)) return false;   // proprio site (loopback)
+	if (nw2_is_google_or_cf($url)) return false;
+	if (nw2_is_local_request($url)) return false;
 	return $pre;
 }, -1000, 3);
 
 /* =============================================================================
  * 2) SMTP + GOOGLE HOSTS DECLARADOS COMO EXTERNOS
- *    Se algum plugin ou config definir WP_HTTP_BLOCK_EXTERNAL=true,
- *    WordPress bloqueia TUDO exceto hosts explicitamente declarados aqui.
- *    O callback OAuth do Site Kit precisa disto para o token exchange.
+ *    Essencial para o fluxo OAuth do Site Kit (token exchange).
  * ========================================================================== */
 add_filter('http_request_host_is_external', function ($external, $host) {
 	$host = strtolower((string)$host);
@@ -133,7 +130,6 @@ add_filter('http_request_host_is_external', function ($external, $host) {
 	if ($cfg && $host === $cfg) return true;
 
 	// Garante que hosts Google sejam reconhecidos como externos
-	// Essencial para o fluxo OAuth do Site Kit (token exchange)
 	static $google_hosts = [
 		'sitekit.withgoogle.com', 'oauth2.googleapis.com',
 		'www.googleapis.com', 'accounts.google.com',
@@ -156,8 +152,6 @@ add_filter('elementor/admin/show_home_screen', '__return_false', 0);
 
 add_filter('pre_http_request', function ($pre, $args, $url) {
 	$host = parse_url($url, PHP_URL_HOST) ?: '';
-
-	// Bloqueia elementor.com, elementor.cloud, elementor.io e subdominios
 	if (!preg_match('~(^|\.)elementor\.(com|cloud|io)$~i', $host)) return false;
 
 	return [
@@ -180,7 +174,6 @@ add_filter('pre_http_request', function ($pre, $args, $url) {
 /* =============================================================================
  * 4) WP-CRON BYPASS — CRITICO PARA GOOGLE SITE KIT
  *    Site Kit agenda wp_schedule_single_event para refresh de token OAuth.
- *    Se o cron nao consegue fazer requisicoes, o token expira.
  *    No cron, permite tudo exceto Elementor + sites null.
  * ========================================================================== */
 add_filter('pre_http_request', function ($pre, $args, $url) {
@@ -189,7 +182,6 @@ add_filter('pre_http_request', function ($pre, $args, $url) {
 	$host = parse_url($url, PHP_URL_HOST) ?: '';
 	if (!$host) return false;
 
-	// No cron, bloqueia so Elementor + null
 	$bloqueios_cron = [
 		'elementor.com', 'elementor.cloud', 'elementor.io',
 		'wpnull', 'nulled', 'gpl', 'crack', 'null.', 'festinger',
@@ -200,14 +192,13 @@ add_filter('pre_http_request', function ($pre, $args, $url) {
 		}
 	}
 
-	return false; // permite todo o resto (Google OAuth, APIs, SMTP, etc)
+	return false;
 }, -200, 3);
 
 /* =============================================================================
  * 5) FAIL-FAST — APENAS AJAX PURO (NUNCA REST / GOOGLE / CF / CRON)
  * ========================================================================== */
 add_filter('pre_http_request', function ($pre, $args, $url) {
-	// So bloqueia requisicoes AJAX puras (nao-REST, nao-Google, nao-Cron)
 	if (!defined('DOING_AJAX') || !DOING_AJAX) return false;
 	if (defined('REST_REQUEST') && REST_REQUEST) return false;
 	if (nw2_is_google_or_cf($url)) return false;
@@ -227,7 +218,6 @@ add_filter('pre_http_request', function ($pre, $args, $url) {
  * ========================================================================== */
 add_filter('pre_http_request', function ($pre, $args, $url) {
 
-	// Nunca bloqueia Google / Cloudflare / WordPress / SMTP / localhost
 	if (
 		nw2_is_google_or_cf($url) ||
 		nw2_is_local_request($url) ||
@@ -257,10 +247,10 @@ add_filter('pre_http_request', function ($pre, $args, $url) {
 		'premiumgpl.com','wppluginsforyou.com','wpeden.com',
 
 		// === SITES DE LICENCA / VERIFICACAO DE PURCHASE CODE ===
-		'api.envato.com',          // Envato API (verifica purchase codes)
-		'purchasekey.com',         // Verificacao de chave
-		'license-check.',          // Generico: license-check.algumacoisa
-		'check-license.',          // Generico: check-license.algumacoisa
+		'api.envato.com',
+		'purchasekey.com',
+		'license-check.',
+		'check-license.',
 
 		// === SUCURI / SCANNERS EXTERNOS ===
 		'wp-plugin.sucuri.net','sitecheck.sucuri.net',
@@ -268,24 +258,23 @@ add_filter('pre_http_request', function ($pre, $args, $url) {
 		// === TEMAS / PLUGINS PREMIUM (callbacks de update/licenca) ===
 		'support.wpbakery.com','sliderrevolution.com','revslider','slider-revolution','revslider.php',
 		'salient','betheme','bridge.qodeinteractive.com','update.yithemes.com','yithemes.com',
-		// Temas adicionais
 		'update.themeforest.net','api.themeforest.net',
 		'update.avada.com','avada.theme-fusion.com',
 		'update.divi.com','elegantthemes.com',
 		'update.astra.com','bsf.io','brainstormforce.com',
 		'update.oceanwp.org','oceanwp.org',
-		'pixelyoursite.com',       // Pixel Your Site pro
-		'pixtheme.com',            // Temas premium
+		'pixelyoursite.com',
+		'pixtheme.com',
 		'update.the7.io','the7.io',
 
 		// === TRACKERS / TELEMETRIA SUSPEITA ===
-		'usage.tracking.',         // Telemetria generica
-		'statistic.wp-',           // Estatisticas suspeitas
-		'hotjar.com',              // Hotjar tracking
-		'mouseflow.com',           // Mouseflow tracking
-		'fullstory.com',           // FullStory tracking
-		'luckyorange.com',         // Lucky Orange tracking
-		'clarity.ms',              // Microsoft Clarity
+		'usage.tracking.',
+		'statistic.wp-',
+		'hotjar.com',
+		'mouseflow.com',
+		'fullstory.com',
+		'luckyorange.com',
+		'clarity.ms',
 	];
 
 	foreach ($bloqueios as $dominio) {
@@ -299,8 +288,6 @@ add_filter('pre_http_request', function ($pre, $args, $url) {
 
 /* =============================================================================
  * 7) WOOCOMMERCE — SILENCIO (tracking/marketplace) + PRESERVA CART
- *    Desativa telemetria, marketplace e sugestoes.
- *    NAO remove scripts de carrinho/checkout (cada site decide).
  * ========================================================================== */
 add_action('init', function () {
 	add_filter('woocommerce_admin_disabled', '__return_true');
@@ -321,7 +308,32 @@ add_action('init', function () {
 // }, 100);
 
 /* =============================================================================
- * 8) TIMEOUTS CONTROLADOS
+ * 8) DEFAULT DENY — BLOQUEIO IMEDIATO DE NAO-WHITELISTADOS
+ *    Este eh o "fail-fast global". Qualquer host externo que nao passou
+ *    pelos bypasses acima (Google, CF, WP, SMTP, local) recebe WP_Error
+ *    NA HORA, sem esperar timeout de 15s. Resolve o problema de plugins
+ *    piratas que deixam o site LENTO tentando conectar para fora.
+ *
+ *    Para DESATIVAR: define('NW2_DEFAULT_DENY', false); no wp-config.php
+ * ========================================================================== */
+if (!defined('NW2_DEFAULT_DENY')) define('NW2_DEFAULT_DENY', true);
+
+if (NW2_DEFAULT_DENY) {
+	add_filter('pre_http_request', function ($pre, $args, $url) {
+		$host = parse_url($url, PHP_URL_HOST) ?: '';
+		if (!$host) return false;
+
+		// Whitelist final: se nao eh Google/CF/WP/SMTP/local → bloqueia NA HORA
+		if (nw2_is_local_request($url)) return false;
+		if (nw2_is_google_or_cf($url)) return false;
+		if (nw2_is_smtp_host($host) || $host === nw2_get_post_smtp_host()) return false;
+
+		return new WP_Error('nw2_default_deny', "Requisição externa bloqueada: $host");
+	}, 100, 3);
+}
+
+/* =============================================================================
+ * 9) TIMEOUTS CONTROLADOS + AVISO ANTI-CURL NATIVO
  * ========================================================================== */
 add_filter('http_request_args', function ($r) {
 	$r['timeout'] = 15;
@@ -331,8 +343,24 @@ add_filter('http_request_args', function ($r) {
 	return $r;
 });
 
+// Aviso no admin se curl_exec estiver habilitado (bypass do WP HTTP API)
+if (function_exists('curl_exec') && is_admin()) {
+	add_action('admin_notices', function () {
+		if (!current_user_can('manage_options')) return;
+		if (get_transient('nw2_curl_notice_shown')) return;
+		set_transient('nw2_curl_notice_shown', 1, DAY_IN_SECONDS);
+
+		echo '<div class="notice notice-warning"><p><strong>NW2 Seguranca:</strong> ';
+		echo 'A funcao PHP <code>curl_exec</code> esta habilitada. Plugins podem ';
+		echo 'bypassar este bloqueador usando curl nativo. Para maxima protecao, ';
+		echo 'adicione ao <code>php.ini</code>:<br>';
+		echo '<code>disable_functions = curl_exec, curl_multi_exec, file_get_contents</code>';
+		echo '</p></div>';
+	});
+}
+
 /* =============================================================================
- * 9) DEBUG MODE (OPCIONAL) — Loga requisicoes bloqueadas
+ * 10) DEBUG MODE (OPCIONAL) — Loga requisicoes bloqueadas
  *    Defina: define('NW2_DEBUG_LOG', true); no wp-config.php
  *    Logs vao para: wp-content/nw2-blocked-requests.log
  * ========================================================================== */
