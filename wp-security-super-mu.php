@@ -1099,7 +1099,7 @@ function nw2_render_logs() {
                     <select id="log-select" name="log" onchange="this.form.submit()">
                         <?php foreach ($log_files as $file): ?>
                             <option value="<?php echo esc_attr($file); ?>" <?php selected($current_file, $file); ?>>
-                                <?php echo esc_html(basename($file)); ?> (<?php echo esc_html(size_format(filesize($file))); ?>)
+                                <?php echo esc_html(basename($file)); ?> (<?php echo esc_html(file_exists($file) ? size_format(filesize($file)) : 'N/A'); ?>)
                             </option>
                         <?php endforeach; ?>
                     </select>
