@@ -341,10 +341,12 @@ if (!function_exists('nw2_scan_wordpress_permissions')) {
                 ];
                 if ($fix && NW2_FIX_PERMISSIONS) {
                     // Attempt to chmod
-                    if (@chmod($path, $expected)) {
+                    if (chmod($path, $expected)) {
                         $fixed++;
                         // Log
                         error_log('[NW2] Fixed permissions: ' . $path . ' from ' . decoct($current) . ' to ' . decoct($expected));
+                    } else {
+                        error_log('[NW2] Failed to fix permissions: ' . $path);
                     }
                 }
             }
@@ -354,29 +356,34 @@ if (!function_exists('nw2_scan_wordpress_permissions')) {
             set_transient('nw2_scan_progress', round(($processed / $total_files) * 100), 30);
         }
 
-        // Verificação extra: arquivos PHP em uploads
+        // Verificação extra: arquivos PHP em uploads (limitado a 5 níveis)
         $uploads_dir = WP_CONTENT_DIR . '/uploads';
         if (is_dir($uploads_dir)) {
-            $iterator = new RecursiveIteratorIterator(
-                new RecursiveDirectoryIterator($uploads_dir, RecursiveDirectoryIterator::SKIP_DOTS),
-                RecursiveIteratorIterator::SELF_FIRST
-            );
-            foreach ($iterator as $file_info) {
-                if (!$file_info->isFile() || strtolower($file_info->getExtension()) !== 'php') {
-                    continue;
-                }
-                $php_file = $file_info->getPathname();
-                $issues[] = [
-                    'file' => $php_file,
-                    'issue' => 'Arquivo PHP em pasta de uploads',
-                    'severity' => 'critical'
-                ];
-                if ($fix && NW2_FIX_PERMISSIONS) {
-                    if (@unlink($php_file)) {
-                        $fixed++;
-                        error_log('[NW2] Removed PHP file from uploads: ' . $php_file);
+            try {
+                $iterator = new RecursiveIteratorIterator(
+                    new RecursiveDirectoryIterator($uploads_dir, RecursiveDirectoryIterator::SKIP_DOTS),
+                    RecursiveIteratorIterator::SELF_FIRST
+                );
+                $iterator->setMaxDepth(5);
+                foreach ($iterator as $file_info) {
+                    if (!$file_info->isFile() || strtolower($file_info->getExtension()) !== 'php') {
+                        continue;
+                    }
+                    $php_file = $file_info->getPathname();
+                    $issues[] = [
+                        'file' => $php_file,
+                        'issue' => 'Arquivo PHP em pasta de uploads',
+                        'severity' => 'critical'
+                    ];
+                    if ($fix && NW2_FIX_PERMISSIONS) {
+                        if (unlink($php_file)) {
+                            $fixed++;
+                            error_log('[NW2] Removed PHP file from uploads: ' . $php_file);
+                        }
                     }
                 }
+            } catch (Exception $e) {
+                error_log('[NW2] Upload scan error: ' . $e->getMessage());
             }
         }
 
@@ -449,6 +456,10 @@ if (!function_exists('nw2_harden_htaccess')) {
     function nw2_harden_htaccess(): bool {
         $htaccess_path = ABSPATH . '.htaccess';
         if (!file_exists($htaccess_path)) {
+            return false;
+        }
+        if (filesize($htaccess_path) > 2 * 1024 * 1024) {
+            error_log('[NW2] .htaccess muito grande para hardening.');
             return false;
         }
         $original_content = (string) file_get_contents($htaccess_path);
@@ -614,12 +625,30 @@ if (NW2_SANITIZE_UPLOADS) {
             }
         }
 
-        // 3. Verifica arquivos SVG para scripts maliciosos
+        // 3. Verifica arquivos SVG para conteúdo malicioso
         if (strtolower(substr($filename, -4)) === '.svg') {
-            $content = file_get_contents($tmp_name);
-            if (stripos($content, '<script') !== false || stripos($content, 'javascript:') !== false) {
-                $file['error'] = 'SVG contém scripts potencialmente perigosos.';
+            $max_svg_size = 2 * 1024 * 1024;
+            if (!is_readable($tmp_name) || filesize($tmp_name) > $max_svg_size) {
+                $file['error'] = 'SVG muito grande ou ilegível.';
                 return $file;
+            }
+            $content = file_get_contents($tmp_name);
+            $dangerous_patterns = [
+                '~<script~i',
+                '~javascript:~i',
+                '~\sonload\s*=~i',
+                '~\sonerror\s*=~i',
+                '~\sonclick\s*=~i',
+                '~<iframe~i',
+                '~<object~i',
+                '~<embed~i',
+                '~xlink:href\s*=\s*["\'][^"\']*data:~i',
+            ];
+            foreach ($dangerous_patterns as $pattern) {
+                if (preg_match($pattern, $content)) {
+                    $file['error'] = 'SVG contém elementos potencialmente perigosos.';
+                    return $file;
+                }
             }
         }
 
@@ -647,9 +676,19 @@ if (!function_exists('nw2_log_blocked')) {
         $log_file = $log_dir . '/nw2-blocked-requests-' . gmdate('Y-m') . '.log';
         nw2_ensure_log_protected();
         if (file_exists($log_file) && filesize($log_file) > 5 * 1024 * 1024) {
-            @rename($log_file, $log_file . '.old');
+            rename($log_file, $log_file . '.old');
         }
-        error_log($message, 3, $log_file);
+        $fp = fopen($log_file, 'a');
+        if (!$fp) {
+            error_log('[NW2] Failed to open log file: ' . $log_file);
+            return;
+        }
+        if (flock($fp, LOCK_EX)) {
+            fwrite($fp, $message);
+            fflush($fp);
+            flock($fp, LOCK_UN);
+        }
+        fclose($fp);
     }
 }
 
