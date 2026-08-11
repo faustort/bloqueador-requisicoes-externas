@@ -73,7 +73,9 @@ if (!function_exists('nw2_host_matches')) {
 
 if (!function_exists('nw2_google_or_cf_hosts')) {
     function nw2_google_or_cf_hosts(): array {
-        return apply_filters('nw2_blocker_whitelist', [
+        static $hosts;
+        if ($hosts !== null) return $hosts;
+        $hosts = apply_filters('nw2_blocker_whitelist', [
             // Google
             'withgoogle.com', 'googleapis.com', 'accounts.google.com',
             'googleusercontent.com', 'googletagmanager.com', 'google-analytics.com',
@@ -93,6 +95,7 @@ if (!function_exists('nw2_google_or_cf_hosts')) {
             // CEP / endereço Brasil
             'viacep.com.br', 'brasilapi.com.br', 'correios.com.br',
         ]);
+        return $hosts;
     }
 }
 
@@ -110,6 +113,9 @@ if (!function_exists('nw2_is_local_request')) {
         $host = parse_url($url, PHP_URL_HOST);
         if (!$host) return (bool) preg_match('~^/(?!/)~', $url);
         $home = parse_url(home_url(), PHP_URL_HOST);
+        if (!$home) return false;
+        $host = ltrim($host, 'www.');
+        $home = ltrim($home, 'www.');
         return ($host === $home);
     }
 }
@@ -269,9 +275,8 @@ if (NW2_DEFAULT_DENY) {
         if (nw2_is_smtp_host($host) || $host === nw2_get_post_smtp_host()) return false;
         if (nw2_is_woocommerce_critical_context()) return false;
         if (NW2_DEFAULT_DENY_DRY_RUN) {
-            nw2_ensure_log_protected();
             $log = '[' . gmdate('Y-m-d H:i:s') . "] nw2_default_deny_DRY_RUN (teria bloqueado) | Host: {$host} | URL: {$url}\n";
-            error_log($log, 3, WP_CONTENT_DIR . '/nw2-blocked-requests.log');
+            nw2_log_blocked($log);
             return false;
         }
         return new WP_Error('nw2_default_deny', "Requisição externa bloqueada: $host");
@@ -353,14 +358,20 @@ if (!function_exists('nw2_scan_wordpress_permissions')) {
         // Verificação extra: arquivos PHP em uploads
         $uploads_dir = WP_CONTENT_DIR . '/uploads';
         if (is_dir($uploads_dir)) {
-            $php_files = glob($uploads_dir . '/**/*.php');
-            foreach ($php_files as $php_file) {
+            $iterator = new RecursiveIteratorIterator(
+                new RecursiveDirectoryIterator($uploads_dir, RecursiveDirectoryIterator::SKIP_DOTS),
+                RecursiveIteratorIterator::SELF_FIRST
+            );
+            foreach ($iterator as $file_info) {
+                if (!$file_info->isFile() || strtolower($file_info->getExtension()) !== 'php') {
+                    continue;
+                }
+                $php_file = $file_info->getPathname();
                 $issues[] = [
                     'file' => $php_file,
                     'issue' => 'Arquivo PHP em pasta de uploads',
                     'severity' => 'critical'
                 ];
-                // Optionally delete or move? We'll just report.
                 if ($fix && NW2_FIX_PERMISSIONS) {
                     if (@unlink($php_file)) {
                         $fixed++;
@@ -434,19 +445,25 @@ if (NW2_AUTO_HARDEN_HTACCESS) {
 if (!function_exists('nw2_harden_htaccess')) {
     function nw2_harden_htaccess(): bool {
         $htaccess_path = ABSPATH . '.htaccess';
-        $original_content = file_exists($htaccess_path) ? file_get_contents($htaccess_path) : '';
+        if (!file_exists($htaccess_path)) {
+            return false;
+        }
+        $original_content = (string) file_get_contents($htaccess_path);
+        $home_host = parse_url(home_url(), PHP_URL_HOST) ?: '';
 
         // Regras de segurança específicas
         $security_rules = "\n# ======= NW2 SECURITY HARDENING =======\n";
 
         // 1. Protege wp-config.php
         $security_rules .= "<Files \"wp-config.php\">\n";
-        $security_rules .= "Order allow,deny\nDeny from all\n";
+        $security_rules .= "<IfModule mod_authz_core.c>\nRequire all denied\n</IfModule>\n";
+        $security_rules .= "<IfModule !mod_authz_core.c>\nOrder allow,deny\nDeny from all\n</IfModule>\n";
         $security_rules .= "</Files>\n\n";
 
         // 2. Bloqueia acesso a arquivos sensíveis
         $security_rules .= "<FilesMatch \"\\.(log|ini|conf|bak|old|swp)$\">\n";
-        $security_rules .= "Order allow,deny\nDeny from all\n";
+        $security_rules .= "<IfModule mod_authz_core.c>\nRequire all denied\n</IfModule>\n";
+        $security_rules .= "<IfModule !mod_authz_core.c>\nOrder allow,deny\nDeny from all\n</IfModule>\n";
         $security_rules .= "</FilesMatch>\n\n";
 
         // 3. Protege diretórios
@@ -459,13 +476,19 @@ if (!function_exists('nw2_harden_htaccess')) {
         $security_rules .= "</IfModule>\n\n";
 
         // 4. Previne hotlinking
-        $security_rules .= "RewriteCond %{HTTP_REFERER} !^$\n";
-        $security_rules .= "RewriteCond %{HTTP_REFERER} !^https?://(www\\.)?".preg_quote(parse_url(home_url(), PHP_URL_HOST))." [NC]\n";
-        $security_rules .= "RewriteRule \\.(jpg|jpeg|png|gif)$ - [F,NC]\n\n";
+        if ($home_host) {
+            $security_rules .= "<IfModule mod_rewrite.c>\n";
+            $security_rules .= "RewriteCond %{HTTP_REFERER} !^$\n";
+            $security_rules .= "RewriteCond %{HTTP_REFERER} !^https?://(www\\.)?".preg_quote($home_host)." [NC]\n";
+            $security_rules .= "RewriteRule \\.(jpg|jpeg|png|gif)$ - [F,NC]\n";
+            $security_rules .= "</IfModule>\n\n";
+        }
 
         // 5. Bloqueia user agents maliciosos
+        $security_rules .= "<IfModule mod_rewrite.c>\n";
         $security_rules .= "RewriteCond %{HTTP_USER_AGENT} (libwww-perl|wget|python|nikto|wkto|scan|java|curl) [NC]\n";
         $security_rules .= "RewriteRule .* - [F,L]\n";
+        $security_rules .= "</IfModule>\n";
 
         // Remove regras anteriores NW2 se existirem
         $pattern = '/# ======= NW2 SECURITY HARDENING =======.*?# ======= END NW2 =======/s';
@@ -594,6 +617,17 @@ if (!function_exists('nw2_ensure_log_protected')) {
     }
 }
 
+if (!function_exists('nw2_log_blocked')) {
+    function nw2_log_blocked(string $message): void {
+        $log_path = WP_CONTENT_DIR . '/nw2-blocked-requests.log';
+        nw2_ensure_log_protected();
+        if (file_exists($log_path) && filesize($log_path) > 5 * 1024 * 1024) {
+            @rename($log_path, $log_path . '.old');
+        }
+        error_log($message, 3, $log_path);
+    }
+}
+
 /* =============================================================================
  * HARDENING BÁSICO (COMPATIBILIDADE)
  * ========================================================================== */
@@ -621,14 +655,13 @@ if (defined('NW2_DEBUG_LOG') && NW2_DEBUG_LOG) {
         if (is_wp_error($response)) {
             $code = $response->get_error_code();
             if (strpos($code, 'nw2_') === 0) {
-                nw2_ensure_log_protected();
                 $log  = '[' . gmdate('Y-m-d H:i:s') . '] ';
                 $log .= $code . ' | ' . $response->get_error_message() . ' | ';
                 $log .= 'URL: ' . $url . ' | ';
                 $log .= 'Context: ' . $context . ' | ';
                 $log .= 'Cron: ' . (nw2_is_cron() ? 'sim' : 'nao') . ' | ';
                 $log .= 'AJAX: ' . ((defined('DOING_AJAX') && DOING_AJAX) ? 'sim' : 'nao') . "\n";
-                error_log($log, 3, WP_CONTENT_DIR . '/nw2-blocked-requests.log');
+                nw2_log_blocked($log);
             }
         }
     }, 10, 5);
@@ -956,7 +989,7 @@ add_action('admin_notices', function() {
     $alerts = nw2_get_all_alerts();
 
     // Se não há alertas ou usuário já viu todos, não mostra nada
-    if ($alerts['count'] === 0 || get_user_meta(get_current_user_id(), 'nw2_hide_all_alerts', true)) {
+    if ($alerts['count'] === 0 || get_user_meta(get_current_user_id(), 'nw2_hide_global_alert', true)) {
         return;
     }
 
@@ -964,8 +997,8 @@ add_action('admin_notices', function() {
     ?>
     <div class="notice notice-warning is-dismissible nw2-global-alert">
         <p>
-            <strong>NW2 Security:</strong> Você tem <?php echo $alerts['count']; ?> alerta(s) de segurança.
-            <a href="<?php echo admin_url('admin.php?page=nw2-security-alerts'); ?>">Ver detalhes</a>
+            <strong>NW2 Security:</strong> Você tem <?php echo esc_html($alerts['count']); ?> alerta(s) de segurança.
+            <a href="<?php echo esc_url(admin_url('admin.php?page=nw2-security-alerts')); ?>">Ver detalhes</a>
             <button type="button" class="button-link nw2-dismiss-all" style="margin-left: 10px;">Dispensar todos</button>
         </p>
     </div>
@@ -998,13 +1031,15 @@ add_action('admin_notices', function() {
 
 // AJAX handlers
 add_action('wp_ajax_nw2_dismiss_notice', function() {
-    if (!wp_verify_nonce($_POST['nonce'], 'nw2_dismiss')) return;
+    if (!current_user_can('manage_options')) wp_die('Unauthorized');
+    if (!wp_verify_nonce($_POST['nonce'] ?? '', 'nw2_dismiss')) wp_die('Invalid nonce');
     update_user_meta(get_current_user_id(), 'nw2_hide_global_alert', true);
     wp_die();
 });
 
 add_action('wp_ajax_nw2_dismiss_all_alerts', function() {
-    if (!wp_verify_nonce($_POST['nonce'], 'nw2_dismiss_all')) return;
+    if (!current_user_can('manage_options')) wp_die('Unauthorized');
+    if (!wp_verify_nonce($_POST['nonce'] ?? '', 'nw2_dismiss_all')) wp_die('Invalid nonce');
     update_user_meta(get_current_user_id(), 'nw2_hide_all_alerts', true);
     wp_die();
 });
