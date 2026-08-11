@@ -1,24 +1,27 @@
 <?php
 /**
- * Plugin Name: NW2 Security Suite (MU) — Bloqueador + Scanner + Hardening
+ * Plugin Name: NW2 Security Suite Pro (MU)
  * Plugin URI:  https://www.nw2web.com.br
  * Description: Bloqueador de requisições externas + scanner de permissões + hardening .htaccess + monitoramento arquivos. Tudo em um único MU-plugin.
  * Author:      NW2
- * Version:     3.0.1
+ * Version:     3.1.7
  *
  * Instale como MU-plugin: wp-content/mu-plugins/wp-security-super-mu.php
  *
  * ATENÇÃO: NUNCA defina WP_HTTP_BLOCK_EXTERNAL=true — este plugin usa sistema próprio via pre_http_request
  */
 
-if (!defined('ABSPATH')) exit;
+if (!defined('ABSPATH')) { exit; }
 
 /* =============================================================================
  * CONFIGURAÇÕES GLOBAIS
  * ========================================================================== */
 if (!defined('NW2_DEFAULT_DENY')) define('NW2_DEFAULT_DENY', true);
 if (!defined('NW2_DEFAULT_DENY_DRY_RUN')) define('NW2_DEFAULT_DENY_DRY_RUN', false);
+if (!defined('NW2_DEBUG_BLOCKED_HOSTS')) define('NW2_DEBUG_BLOCKED_HOSTS', false);
+if (!defined('NW2_DISABLE_CURL')) define('NW2_DISABLE_CURL', true);
 if (!defined('NW2_SCAN_PERMISSIONS')) define('NW2_SCAN_PERMISSIONS', true);
+if (!defined('NW2_MAX_LOG_AGE_DAYS')) define('NW2_MAX_LOG_AGE_DAYS', 90);
 if (!defined('NW2_FIX_PERMISSIONS')) define('NW2_FIX_PERMISSIONS', false);
 if (!defined('NW2_PERMISSION_BACKUP')) define('NW2_PERMISSION_BACKUP', true);
 if (!defined('NW2_PERMISSION_NOTIFY')) define('NW2_PERMISSION_NOTIFY', false);
@@ -76,7 +79,7 @@ if (!function_exists('nw2_google_or_cf_hosts')) {
         if ($hosts !== null) return $hosts;
         $hosts = apply_filters('nw2_blocker_whitelist', [
             // Google
-            'withgoogle.com', 'googleapis.com', 'accounts.google.com',
+            'withgoogle.com', 'googleapis.com', 'accounts.google.com', 'firebase.google.com',
             'googleusercontent.com', 'googletagmanager.com', 'google-analytics.com',
             'doubleclick.net', 'googleadservices.com', 'googlesyndication.com',
             'gstatic.com', 'appspot.com', 'google.com',
@@ -475,6 +478,10 @@ if (!function_exists('nw2_harden_htaccess')) {
         $security_rules .= "</Files>\n\n";
 
         // 2. Bloqueia acesso a arquivos sensíveis
+        $security_rules .= "<FilesMatch \"^\\\\.env$\">\n";
+        $security_rules .= "<IfModule mod_authz_core.c>\nRequire all denied\n</IfModule>\n";
+        $security_rules .= "<IfModule !mod_authz_core.c>\nOrder allow,deny\nDeny from all\n</IfModule>\n";
+        $security_rules .= "</FilesMatch>\n\n";
         $security_rules .= "<FilesMatch \"\\.(log|ini|conf|bak|old|swp)$\">\n";
         $security_rules .= "<IfModule mod_authz_core.c>\nRequire all denied\n</IfModule>\n";
         $security_rules .= "<IfModule !mod_authz_core.c>\nOrder allow,deny\nDeny from all\n</IfModule>\n";
@@ -503,10 +510,39 @@ if (!function_exists('nw2_harden_htaccess')) {
         $security_rules .= "RewriteCond %{HTTP_USER_AGENT} (libwww-perl|wget|python|nikto|wkto|scan|java|curl) [NC]\n";
         $security_rules .= "RewriteRule .* - [F,L]\n";
         $security_rules .= "</IfModule>\n";
+        $security_rules .= "Options -Indexes\n";
+        $security_rules .= "ServerSignature Off\n";
+        $security_rules .= "Header always set X-Frame-Options \"SAMEORIGIN\"\n";
+        $security_rules .= "Header always set X-Content-Type-Options \"nosniff\"\n";
+        $security_rules .= "<IfModule mod_setenvif.c>\n";
+        $security_rules .= "<IfModule mod_authz_core.c>\n";
+        $security_rules .= "SetEnvIfNoCase User-Agent (libwww-perl|wget|python|nikto|wkto|scan|java|curl) bad_bot\n";
+        $security_rules .= "<RequireAll>\n";
+        $security_rules .= "Require not env bad_bot\n";
+        $security_rules .= "</RequireAll>\n";
+        $security_rules .= "</IfModule>\n";
+        $security_rules .= "<IfModule !mod_authz_core.c>\n";
+        $security_rules .= "SetEnvIfNoCase User-Agent (libwww-perl|wget|python|nikto|wkto|scan|java|curl) bad_bot\n";
+        $security_rules .= "Deny from env=bad_bot\n";
+        $security_rules .= "</IfModule>\n";
+        $security_rules .= "</IfModule>\n";
+        $security_rules .= "<IfModule mod_setenvif.c>\n";
+        $security_rules .= "<IfModule mod_authz_core.c>\n";
+        $security_rules .= "SetEnvIfNoCase User-Agent (libwww-perl|wget|python|nikto|wkto|scan|java|curl) bad_bot\n";
+        $security_rules .= "<RequireAll>\n";
+        $security_rules .= "Require not env bad_bot\n";
+        $security_rules .= "</RequireAll>\n";
+        $security_rules .= "</IfModule>\n";
+        $security_rules .= "<IfModule !mod_authz_core.c>\n";
+        $security_rules .= "SetEnvIfNoCase User-Agent (libwww-perl|wget|python|nikto|wkto|scan|java|curl) bad_bot\n";
+        $security_rules .= "Deny from env=bad_bot\n";
+        $security_rules .= "</IfModule>\n";
+        $security_rules .= "</IfModule>\n";
 
         // Remove regras anteriores NW2 se existirem
         $pattern = '/# ======= NW2 SECURITY HARDENING =======.*?# ======= END NW2 =======/s';
         $original_content = preg_replace($pattern, '', $original_content);
+        $original_content = preg_replace('/\n{3,}/', "\n\n", $original_content);
 
         // Adiciona novas regras
         $new_content = $original_content . $security_rules . "# ======= END NW2 =======\n";
@@ -517,8 +553,20 @@ if (!function_exists('nw2_harden_htaccess')) {
             if (!file_exists($backup_path)) {
                 file_put_contents($backup_path, $original_content);
             }
+            // Limita backups antigos a 10
+            $backups = glob($htaccess_path . '.backup-*');
+            if (is_array($backups) && count($backups) > 25) {
+                usort($backups, 'filemtime');
+                for ($i = 0; $i < count($backups) - 10; $i++) {
+                    @unlink($backups[$i]);
+                }
+            }
         }
 
+        if (!is_writable($htaccess_path)) {
+            error_log('[NW2] .htaccess não é gravável.');
+            return false;
+        }
         return file_put_contents($htaccess_path, $new_content) !== false;
     }
 }
@@ -675,7 +723,7 @@ if (!function_exists('nw2_log_blocked')) {
         $log_dir = WP_CONTENT_DIR;
         $log_file = $log_dir . '/nw2-blocked-requests-' . gmdate('Y-m') . '.log';
         nw2_ensure_log_protected();
-        if (file_exists($log_file) && filesize($log_file) > 5 * 1024 * 1024) {
+        if (file_exists($log_file) && filesize($log_file) > 10 * 1024 * 1024) {
             rename($log_file, $log_file . '.old');
         }
         $fp = fopen($log_file, 'a');
@@ -692,8 +740,9 @@ if (!function_exists('nw2_log_blocked')) {
 
         // Auto-limpeza diária de logs antigos
         if (!get_transient('nw2_logs_cleaned_today')) {
-            nw2_clear_old_logs(90);
+            nw2_clear_old_logs(NW2_MAX_LOG_AGE_DAYS);
             set_transient('nw2_logs_cleaned_today', true, DAY_IN_SECONDS);
+            nw2_ensure_log_protected();
         }
     }
 }
@@ -1025,7 +1074,14 @@ function nw2_render_logs() {
     $current_file = isset($_GET['log']) ? sanitize_text_field($_GET['log']) : (reset($log_files) ?: '');
     $content = ($current_file && file_exists($current_file)) ? file_get_contents($current_file) : '';
     $lines = $content ? array_filter(array_map('trim', explode("\n", $content))) : [];
-    $lines = array_slice($lines, -500, 500, true);
+    $lines = array_values($lines);
+    $per_page = 200;
+    $total_lines = count($lines);
+    $total_pages = max(1, (int) ceil($total_lines / $per_page));
+    $page = isset($_GET['log_page']) ? max(1, (int) $_GET['log_page']) : 1;
+    $page = min($page, $total_pages);
+    $offset = ($page - 1) * $per_page;
+    $paged_lines = array_slice($lines, $offset, $per_page);
     ?>
     <div class="wrap">
         <h1>Logs NW2 Security</h1>
@@ -1054,7 +1110,20 @@ function nw2_render_logs() {
                 </form>
             </div>
             <div class="nw2-card">
-                <pre style="background: #f5f5f5; padding: 15px; border-radius: 4px; max-height: 600px; overflow: auto;"><?php echo esc_html($content ? implode("\n", $lines) : 'Log vazio.'); ?></pre>
+                <pre style="background: #f5f5f5; padding: 15px; border-radius: 4px; max-height: 600px; overflow: auto;"><?php echo esc_html($content ? implode("\n", $paged_lines) : 'Log vazio.'); ?></pre>
+                <?php if ($total_pages > 1): ?>
+                <div class="tablenav">
+                    <div class="tablenav-pages">
+                        <?php for ($i = 1; $i <= $total_pages; $i++): ?>
+                            <?php if ($i === $page): ?>
+                                <strong><?php echo esc_html($i); ?></strong>
+                            <?php else: ?>
+                                <a href="<?php echo esc_url(add_query_arg('log_page', $i)); ?>"><?php echo esc_html($i); ?></a>
+                            <?php endif; ?>
+                        <?php endfor; ?>
+                    </div>
+                </div>
+                <?php endif; ?>
             </div>
         <?php endif; ?>
     </div>
@@ -1072,7 +1141,7 @@ if (!function_exists('nw2_get_log_files')) {
 }
 
 if (!function_exists('nw2_clear_old_logs')) {
-    function nw2_clear_old_logs(int $days = 90): int {
+    function nw2_clear_old_logs(int $days = NW2_MAX_LOG_AGE_DAYS): int {
         $removed = 0;
         $cutoff = time() - ($days * DAY_IN_SECONDS);
         foreach (nw2_get_log_files() as $file) {

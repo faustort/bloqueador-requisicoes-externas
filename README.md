@@ -1,4 +1,4 @@
-# 🔒 Bloqueador de Requisições Externas
+# Bloqueador de Requisições Externas
 
 Plugin WordPress para bloquear conexões externas desnecessárias, aumentar a segurança e otimizar o WooCommerce para uso como catálogo.
 
