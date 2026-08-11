@@ -839,6 +839,15 @@ add_action('admin_menu', function() {
         'nw2-security-alerts',
         'nw2_render_alerts'
     );
+
+    add_submenu_page(
+        'nw2-security-dashboard',
+        'Logs',
+        'Logs',
+        'manage_options',
+        'nw2-security-logs',
+        'nw2_render_logs'
+    );
 });
 
 function nw2_render_dashboard() {
@@ -846,6 +855,15 @@ function nw2_render_dashboard() {
     ?>
     <div class="wrap">
         <h1>NW2 Security Dashboard</h1>
+        <?php if (isset($_GET['scanned'])): ?>
+            <div class="notice notice-success is-dismissible"><p>Scanner executado com sucesso.</p></div>
+        <?php endif; ?>
+        <?php if (isset($_GET['hardened'])): ?>
+            <div class="notice notice-success is-dismissible"><p>Hardening aplicado.</p></div>
+        <?php endif; ?>
+        <?php if (isset($_GET['dismissed_all'])): ?>
+            <div class="notice notice-info is-dismissible"><p>Alertas dispensados.</p></div>
+        <?php endif; ?>
 
         <!-- Status Cards -->
         <div class="nw2-dashboard-grid">
@@ -996,6 +1014,72 @@ function nw2_render_alerts() {
     <?php
 }
 
+function nw2_render_logs() {
+    $log_files = nw2_get_log_files();
+    $current_file = isset($_GET['log']) ? sanitize_text_field($_GET['log']) : (reset($log_files) ?: '');
+    $content = ($current_file && file_exists($current_file)) ? file_get_contents($current_file) : '';
+    $lines = $content ? array_filter(array_map('trim', explode("\n", $content))) : [];
+    $lines = array_slice($lines, -500, 500, true);
+    ?>
+    <div class="wrap">
+        <h1>Logs NW2 Security</h1>
+        <?php if (empty($log_files)): ?>
+            <div class="nw2-card">
+                <p>Nenhum log encontrado.</p>
+            </div>
+        <?php else: ?>
+            <div class="nw2-card">
+                <form method="get">
+                    <input type="hidden" name="page" value="nw2-security-logs" />
+                    <label for="log-select">Arquivo:</label>
+                    <select id="log-select" name="log" onchange="this.form.submit()">
+                        <?php foreach ($log_files as $file): ?>
+                            <option value="<?php echo esc_attr($file); ?>" <?php selected($current_file, $file); ?>>
+                                <?php echo esc_html(basename($file)); ?> (<?php echo esc_html(size_format(filesize($file))); ?>)
+                            </option>
+                        <?php endforeach; ?>
+                    </select>
+                </form>
+                <form method="post" style="margin-top: 10px;">
+                    <?php wp_nonce_field('nw2_logs', 'nw2_nonce'); ?>
+                    <button type="submit" name="nw2_clear_old_logs" class="button" onclick="return confirm('Remover logs com mais de 90 dias?');">
+                        Limpar Logs Antigos
+                    </button>
+                </form>
+            </div>
+            <div class="nw2-card">
+                <pre style="background: #f5f5f5; padding: 15px; border-radius: 4px; max-height: 600px; overflow: auto;"><?php echo esc_html($content ? implode("\n", $lines) : 'Log vazio.'); ?></pre>
+            </div>
+        <?php endif; ?>
+    </div>
+    <style>
+        .nw2-card { background: #fff; border: 1px solid #ccd0d4; padding: 20px; margin: 20px 0; border-radius: 4px; }
+    </style>
+    <?php
+}
+
+if (!function_exists('nw2_get_log_files')) {
+    function nw2_get_log_files(): array {
+        $files = glob(WP_CONTENT_DIR . '/nw2-blocked-requests-*.log*');
+        return is_array($files) ? array_reverse($files) : [];
+    }
+}
+
+if (!function_exists('nw2_clear_old_logs')) {
+    function nw2_clear_old_logs(int $days = 90): int {
+        $removed = 0;
+        $cutoff = time() - ($days * DAY_IN_SECONDS);
+        foreach (nw2_get_log_files() as $file) {
+            if (filemtime($file) < $cutoff) {
+                if (unlink($file)) {
+                    $removed++;
+                }
+            }
+        }
+        return $removed;
+    }
+}
+
 /* =============================================================================
  * HANDLERS DE AÇÕES
  * ========================================================================== */
@@ -1042,6 +1126,13 @@ add_action('admin_init', function() {
             update_user_meta(get_current_user_id(), "nw2_hide_{$alert_id}_alert", true);
         }
         wp_redirect(admin_url('admin.php?page=nw2-security-dashboard&dismissed_all=1'));
+        exit;
+    }
+
+    // Clear old logs
+    if (isset($_POST['nw2_clear_old_logs']) && wp_verify_nonce($_POST['nw2_nonce'], 'nw2_logs')) {
+        $removed = nw2_clear_old_logs();
+        wp_redirect(admin_url('admin.php?page=nw2-security-logs&cleared=' . intval($removed)));
         exit;
     }
 });
