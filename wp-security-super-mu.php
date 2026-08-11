@@ -512,13 +512,7 @@ if (!function_exists('nw2_harden_htaccess')) {
 if (NW2_MONITOR_FILE_CHANGES) {
     add_action('admin_init', function() {
         if (!current_user_can('manage_options')) return;
-
-        // Verificação a cada 6 horas
-        $last_check = get_transient('nw2_last_file_monitor');
-        if (!$last_check || time() - $last_check > 6 * HOUR_IN_SECONDS) {
-            nw2_monitor_core_files();
-            set_transient('nw2_last_file_monitor', time(), 6 * HOUR_IN_SECONDS);
-        }
+        nw2_monitor_core_files();
     });
 }
 
@@ -533,6 +527,13 @@ if (!function_exists('nw2_monitor_core_files')) {
             ABSPATH . 'xmlrpc.php'
         ];
 
+        // Evita recomputar hashes em cada carregamento de página
+        $last_check = get_transient('nw2_last_file_monitor_check');
+        $previous_hashes = get_option('nw2_file_hashes', []);
+        if ($last_check && time() - $last_check < 6 * HOUR_IN_SECONDS) {
+            return nw2_detect_file_changes($previous_hashes, $critical_files);
+        }
+
         // Hash atual dos arquivos
         $current_hashes = [];
         foreach ($critical_files as $file) {
@@ -540,9 +541,6 @@ if (!function_exists('nw2_monitor_core_files')) {
                 $current_hashes[$file] = md5_file($file);
             }
         }
-
-        // Compara com hash anterior
-        $previous_hashes = get_option('nw2_file_hashes', []);
 
         foreach ($current_hashes as $file => $hash) {
             if (isset($previous_hashes[$file]) && $previous_hashes[$file] !== $hash) {
@@ -555,11 +553,31 @@ if (!function_exists('nw2_monitor_core_files')) {
             }
         }
 
-        // Atualiza hashes
+        // Atualiza hashes e timestamp
         update_option('nw2_file_hashes', $current_hashes);
+        set_transient('nw2_last_file_monitor_check', time(), 6 * HOUR_IN_SECONDS);
 
-        // Apenas retorna mudanças - avisos centralizados no dashboard
+        return $changes;
+    }
+}
 
+if (!function_exists('nw2_detect_file_changes')) {
+    function nw2_detect_file_changes(array $previous_hashes, array $critical_files): array {
+        $changes = [];
+        foreach ($critical_files as $file) {
+            if (!file_exists($file) || !isset($previous_hashes[$file])) {
+                continue;
+            }
+            $hash = md5_file($file);
+            if ($previous_hashes[$file] !== $hash) {
+                $changes[] = [
+                    'file' => $file,
+                    'previous_hash' => $previous_hashes[$file],
+                    'current_hash' => $hash,
+                    'timestamp' => filemtime($file)
+                ];
+            }
+        }
         return $changes;
     }
 }
@@ -880,7 +898,7 @@ function nw2_render_alerts() {
                 <?php foreach ($alerts['alerts'] as $index => $alert): ?>
                     <div class="nw2-card" style="border-left: 4px solid <?php echo $alert['severity'] === 'warning' ? '#f0ad4e' : '#d9534f'; ?>;">
                         <h3><?php echo esc_html($alert['title']); ?></h3>
-                        <p><?php echo $alert['message']; ?></p>
+                        <p><?php echo esc_html($alert['message']); ?></p>
 
                         <?php if (!empty($alert['details'])): ?>
                             <details style="margin-top: 10px;">
@@ -904,7 +922,7 @@ function nw2_render_alerts() {
 
                         <?php if (!empty($alert['solution'])): ?>
                             <div style="margin-top: 10px; padding: 10px; background: #e7f3ff; border-radius: 4px;">
-                                <strong>Solução:</strong><br><?php echo $alert['solution']; ?>
+                                <strong>Solução:</strong><br><?php echo wp_kses_post($alert['solution']); ?>
                             </div>
                         <?php endif; ?>
 
@@ -958,8 +976,8 @@ add_action('admin_init', function() {
 
     // Quick actions
     if (isset($_POST['nw2_scan_now']) && wp_verify_nonce($_POST['nw2_nonce'], 'nw2_actions')) {
-        $issues = nw2_scan_wordpress_permissions();
-        set_transient('nw2_scan_result', count($issues), 300);
+        $scan_result = nw2_scan_wordpress_permissions();
+        set_transient('nw2_scan_result', $scan_result['count'], 300);
         wp_redirect(admin_url('admin.php?page=nw2-security-dashboard&scanned=1'));
         exit;
     }
