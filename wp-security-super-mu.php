@@ -689,6 +689,12 @@ if (!function_exists('nw2_log_blocked')) {
             flock($fp, LOCK_UN);
         }
         fclose($fp);
+
+        // Auto-limpeza diária de logs antigos
+        if (!get_transient('nw2_logs_cleaned_today')) {
+            nw2_clear_old_logs(90);
+            set_transient('nw2_logs_cleaned_today', true, DAY_IN_SECONDS);
+        }
     }
 }
 
