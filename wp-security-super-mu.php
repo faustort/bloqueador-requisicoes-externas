@@ -22,7 +22,6 @@ if (!defined('NW2_SCAN_PERMISSIONS')) define('NW2_SCAN_PERMISSIONS', true);
 if (!defined('NW2_FIX_PERMISSIONS')) define('NW2_FIX_PERMISSIONS', false);
 if (!defined('NW2_PERMISSION_BACKUP')) define('NW2_PERMISSION_BACKUP', true);
 if (!defined('NW2_PERMISSION_NOTIFY')) define('NW2_PERMISSION_NOTIFY', false);
-if (!defined('NW2_SCAN_PROGRESS')) define('NW2_SCAN_PROGRESS', 0);
 if (!defined('NW2_AUTO_HARDEN_HTACCESS')) define('NW2_AUTO_HARDEN_HTACCESS', true);
 if (!defined('NW2_MONITOR_FILE_CHANGES')) define('NW2_MONITOR_FILE_CHANGES', true);
 if (!defined('NW2_SANITIZE_UPLOADS')) define('NW2_SANITIZE_UPLOADS', true);
@@ -392,8 +391,12 @@ if (!function_exists('nw2_scan_wordpress_permissions')) {
 
         // Notify if fixes applied and notifications enabled
         if ($fix && NW2_FIX_PERMISSIONS && $fixed > 0 && NW2_PERMISSION_NOTIFY && is_admin() && current_user_can('manage_options')) {
-            // Could send email, but for now just log
-            error_log('[NW2] Permission fix completed: ' . $fixed . ' items fixed.');
+            $admin_email = get_option('admin_email');
+            if ($admin_email) {
+                $subject = '[NW2 Security] Permissões corrigidas automaticamente';
+                $body = "Foram corrigidos {$fixed} item(s) de permissão no site " . home_url() . ".\n\nNW2 Security Suite";
+                @wp_mail($admin_email, $subject, $body);
+            }
             // Optionally set a transient for admin notice
             set_transient('nw2_permission_fixed_notice', $fixed, 12 * HOUR_IN_SECONDS);
         }
@@ -497,9 +500,12 @@ if (!function_exists('nw2_harden_htaccess')) {
         // Adiciona novas regras
         $new_content = $original_content . $security_rules . "# ======= END NW2 =======\n";
 
-        // Backup do original
-        if ($original_content !== '' && !file_exists($htaccess_path . '.backup')) {
-            file_put_contents($htaccess_path . '.backup', $original_content);
+        // Backup versionado do original
+        if ($original_content !== '') {
+            $backup_path = $htaccess_path . '.backup-' . gmdate('Ymd-His');
+            if (!file_exists($backup_path)) {
+                file_put_contents($backup_path, $original_content);
+            }
         }
 
         return file_put_contents($htaccess_path, $new_content) !== false;
@@ -627,22 +633,23 @@ if (NW2_SANITIZE_UPLOADS) {
 if (!function_exists('nw2_ensure_log_protected')) {
     function nw2_ensure_log_protected(): void {
         $htaccess = WP_CONTENT_DIR . '/.htaccess';
-        $marker = 'nw2-blocked-requests.log';
+        $marker = 'NW2_BLOCKED_REQUESTS';
         $existing = is_file($htaccess) ? (string)file_get_contents($htaccess) : '';
         if (strpos($existing, $marker) !== false) return;
-        $rule = "\n# NW2 — protege log de requisições bloqueadas\n<Files \"{$marker}\">\n<IfModule mod_authz_core.c>\nRequire all denied\n</IfModule>\n<IfModule !mod_authz_core.c>\nOrder allow,deny\nDeny from all\n</IfModule>\n</Files>\n";
+        $rule = "\n# NW2 — protege log de requisições bloqueadas\n<FilesMatch \"^nw2-blocked-requests-.*\\.log(\\.old)?$\">\n<IfModule mod_authz_core.c>\nRequire all denied\n</IfModule>\n<IfModule !mod_authz_core.c>\nOrder allow,deny\nDeny from all\n</IfModule>\n</FilesMatch>\n";
         @file_put_contents($htaccess, $existing . $rule);
     }
 }
 
 if (!function_exists('nw2_log_blocked')) {
     function nw2_log_blocked(string $message): void {
-        $log_path = WP_CONTENT_DIR . '/nw2-blocked-requests.log';
+        $log_dir = WP_CONTENT_DIR;
+        $log_file = $log_dir . '/nw2-blocked-requests-' . gmdate('Y-m') . '.log';
         nw2_ensure_log_protected();
-        if (file_exists($log_path) && filesize($log_path) > 5 * 1024 * 1024) {
-            @rename($log_path, $log_path . '.old');
+        if (file_exists($log_file) && filesize($log_file) > 5 * 1024 * 1024) {
+            @rename($log_file, $log_file . '.old');
         }
-        error_log($message, 3, $log_path);
+        error_log($message, 3, $log_file);
     }
 }
 
