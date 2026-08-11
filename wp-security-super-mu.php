@@ -470,6 +470,7 @@ if (!function_exists('nw2_harden_htaccess')) {
 
         // Regras de segurança específicas
         $security_rules = "\n# ======= NW2 SECURITY HARDENING =======\n";
+        $security_rules .= "Header always set X-Content-Type-Options \"nosniff\"\n";
 
         // 1. Protege wp-config.php
         $security_rules .= "<Files \"wp-config.php\">\n";
