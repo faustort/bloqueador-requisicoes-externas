@@ -4,7 +4,7 @@
  * Plugin URI:  https://www.nw2web.com.br
  * Description: Bloqueador de requisições externas + scanner de permissões + hardening .htaccess + monitoramento arquivos. Tudo em um único MU-plugin.
  * Author:      NW2
- * Version:     3.1.7
+ * Version:     3.1.8
  *
  * Instale como MU-plugin: wp-content/mu-plugins/wp-security-super-mu.php
  *
@@ -22,6 +22,7 @@ if (!defined('NW2_DEBUG_BLOCKED_HOSTS')) define('NW2_DEBUG_BLOCKED_HOSTS', false
 if (!defined('NW2_DISABLE_CURL')) define('NW2_DISABLE_CURL', true);
 if (!defined('NW2_SCAN_PERMISSIONS')) define('NW2_SCAN_PERMISSIONS', true);
 if (!defined('NW2_MAX_LOG_AGE_DAYS')) define('NW2_MAX_LOG_AGE_DAYS', 90);
+if (!defined('NW2_MAX_HTACCESS_BACKUPS')) define('NW2_MAX_HTACCESS_BACKUPS', 25);
 if (!defined('NW2_FIX_PERMISSIONS')) define('NW2_FIX_PERMISSIONS', false);
 if (!defined('NW2_PERMISSION_BACKUP')) define('NW2_PERMISSION_BACKUP', true);
 if (!defined('NW2_PERMISSION_NOTIFY')) define('NW2_PERMISSION_NOTIFY', false);
