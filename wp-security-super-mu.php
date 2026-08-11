@@ -477,21 +477,7 @@ if (!function_exists('nw2_monitor_core_files')) {
         // Atualiza hashes
         update_option('nw2_file_hashes', $current_hashes);
 
-        // Notifica admin sobre mudanças
-        if (!empty($changes) && is_admin() && current_user_can('manage_options')) {
-            add_action('admin_notices', function() use ($changes) {
-                echo '<div class="notice notice-warning"><p><strong>NW2 Monitor:</strong> ';
-                echo count($changes) . ' arquivo(s) crítico(s) foram alterados. ';
-                echo '<a href="#" onclick="jQuery(\'#nw2-changes-details\').toggle(); return false;">Ver alterações</a></p>';
-                echo '<div id="nw2-changes-details" style="display:none; background:#f5f5f5; padding:10px; margin-top:10px;">';
-                foreach ($changes as $change) {
-                    $filename = basename($change['file']);
-                    $time = date('d/m/Y H:i:s', $change['timestamp']);
-                    echo "<p><strong>{$filename}</strong> alterado em {$time}</p>";
-                }
-                echo '</div></div>';
-            });
-        }
+        // Apenas retorna mudanças - avisos centralizados no dashboard
 
         return $changes;
     }
@@ -567,19 +553,7 @@ add_filter('http_request_args', function ($r) {
     return $r;
 });
 
-if (function_exists('curl_exec') && is_admin()) {
-    add_action('admin_notices', function () {
-        if (!current_user_can('manage_options')) return;
-        if (get_transient('nw2_curl_notice_shown')) return;
-        set_transient('nw2_curl_notice_shown', 1, DAY_IN_SECONDS);
-        echo '<div class="notice notice-warning"><p><strong>NW2 Seguranca:</strong> ';
-        echo 'A funcao PHP <code>curl_exec</code> esta habilitada. Plugins podem ';
-        echo 'bypassar este bloqueador usando curl nativo ou sockets crus. Para ';
-        echo 'maxima protecao, adicione ao <code>php.ini</code>:<br>';
-        echo '<code>disable_functions = curl_exec, curl_multi_exec, file_get_contents, fsockopen, stream_socket_client</code>';
-        echo '</p></div>';
-    });
-}
+// O alerta sobre curl_exec agora é centralizado no sistema de avisos
 
 /* =============================================================================
  * DEBUG MODE (OPCIONAL) — Loga requisicoes bloqueadas
@@ -603,70 +577,376 @@ if (defined('NW2_DEBUG_LOG') && NW2_DEBUG_LOG) {
 }
 
 /* =============================================================================
- * PÁGINA DE CONFIGURAÇÃO NO ADMIN
+ * SISTEMA DE AVISOS UNIFICADO (NÃO DESTRUTIVO)
+ * ========================================================================== */
+if (!function_exists('nw2_get_all_alerts')) {
+    function nw2_get_all_alerts(): array {
+        $alerts = [];
+        $alert_count = 0;
+
+        // 1. Alerta sobre curl_exec
+        if (function_exists('curl_exec') && !get_user_meta(get_current_user_id(), 'nw2_hide_curl_alert', true)) {
+            $alerts[] = [
+                'id' => 'curl_alert',
+                'title' => 'Função PHP curl_exec habilitada',
+                'message' => 'Plugins podem bypassar este bloqueador usando curl nativo ou sockets crus.',
+                'solution' => 'Adicione ao php.ini:<br><code>disable_functions = curl_exec, curl_multi_exec, file_get_contents, fsockopen, stream_socket_client</code>',
+                'severity' => 'warning',
+                'dismissible' => true
+            ];
+            $alert_count++;
+        }
+
+        // 2. Scanner de permissões (executa apenas quando necessário)
+        if (NW2_SCAN_PERMISSIONS && !get_transient('nw2_last_permission_scan')) {
+            $permission_issues = nw2_scan_wordpress_permissions();
+            if (!empty($permission_issues)) {
+                $count = count($permission_issues);
+                $alerts[] = [
+                    'id' => 'permission_scan',
+                    'title' => "{$count} problema(s) de permissões encontrados",
+                    'message' => 'Alguns arquivos têm permissões incorretas.',
+                    'details' => array_slice($permission_issues, 0, 5), // Mostra até 5
+                    'severity' => 'warning',
+                    'dismissible' => true
+                ];
+                $alert_count += $count;
+            }
+            set_transient('nw2_last_permission_scan', time(), 24 * HOUR_IN_SECONDS);
+        }
+
+        // 3. Monitor de arquivos
+        if (NW2_MONITOR_FILE_CHANGES) {
+            $file_changes = nw2_monitor_core_files();
+            if (!empty($file_changes) && !get_user_meta(get_current_user_id(), 'nw2_hide_file_changes_alert', true)) {
+                $alerts[] = [
+                    'id' => 'file_changes',
+                    'title' => count($file_changes) . ' arquivo(s) crítico(s) alterados',
+                    'message' => 'Arquivos do WordPress foram modificados.',
+                    'details' => $file_changes,
+                    'severity' => 'warning',
+                    'dismissible' => true
+                ];
+                $alert_count++;
+            }
+        }
+
+        return [
+            'alerts' => $alerts,
+            'count' => $alert_count,
+            'timestamp' => time()
+        ];
+    }
+}
+
+/* =============================================================================
+ * DASHBOARD UNIFICADO NW2
  * ========================================================================== */
 add_action('admin_menu', function() {
-    add_options_page(
+    // Menu principal com badge
+    $alerts = nw2_get_all_alerts();
+    $badge = $alerts['count'] > 0 ? ' <span class="update-plugins count-' . $alerts['count'] . '"><span class="plugin-count">' . $alerts['count'] . '</span></span>' : '';
+
+    add_menu_page(
         'NW2 Security Suite',
-        'NW2 Security',
+        'NW2 Security' . $badge,
+        'manage_options',
+        'nw2-security-dashboard',
+        'nw2_render_dashboard',
+        'dashicons-shield',
+        80
+    );
+
+    // Subpáginas
+    add_submenu_page(
+        'nw2-security-dashboard',
+        'Dashboard',
+        'Dashboard',
+        'manage_options',
+        'nw2-security-dashboard',
+        'nw2_render_dashboard'
+    );
+
+    add_submenu_page(
+        'nw2-security-dashboard',
+        'Configurações',
+        'Configurações',
         'manage_options',
         'nw2-security-settings',
-        function() {
-            ?>
-            <div class="wrap">
-                <h1>NW2 Security Suite</h1>
-                <div class="card">
-                    <h2>Status do Sistema</h2>
-                    <p><strong>Bloqueador de Requisições:</strong> <?php echo NW2_DEFAULT_DENY ? '✅ Ativo' : '❌ Inativo'; ?></p>
-                    <p><strong>Scanner de Permissões:</strong> <?php echo NW2_SCAN_PERMISSIONS ? '✅ Ativo' : '❌ Inativo'; ?></p>
-                    <p><strong>Hardening .htaccess:</strong> <?php echo NW2_AUTO_HARDEN_HTACCESS ? '✅ Ativo' : '❌ Inativo'; ?></p>
-                    <p><strong>Monitor de Arquivos:</strong> <?php echo NW2_MONITOR_FILE_CHANGES ? '✅ Ativo' : '❌ Inativo'; ?></p>
-                    <p><strong>Sanitização de Uploads:</strong> <?php echo NW2_SANITIZE_UPLOADS ? '✅ Ativo' : '❌ Inativo'; ?></p>
-                </div>
-                <div class="card">
-                    <h2>Ações</h2>
-                    <form method="post">
-                        <?php wp_nonce_field('nw2_security_actions', 'nw2_nonce'); ?>
-                        <p>
-                            <button type="submit" name="nw2_scan_permissions" class="button button-primary">
-                                Executar Scanner de Permissões
-                            </button>
-                            <button type="submit" name="nw2_harden_htaccess" class="button button-secondary">
-                                Aplicar Hardening .htaccess
-                            </button>
-                        </p>
-                    </form>
-                </div>
-            </div>
-            <style>
-                .card { background: #fff; border: 1px solid #ccd0d4; padding: 20px; margin: 20px 0; }
-            </style>
-            <?php
-        }
+        'nw2_render_settings'
+    );
+
+    add_submenu_page(
+        'nw2-security-dashboard',
+        'Alertas',
+        'Alertas',
+        'manage_options',
+        'nw2-security-alerts',
+        'nw2_render_alerts'
     );
 });
 
+function nw2_render_dashboard() {
+    $alerts = nw2_get_all_alerts();
+    ?>
+    <div class="wrap">
+        <h1>NW2 Security Dashboard</h1>
+
+        <!-- Status Cards -->
+        <div class="nw2-dashboard-grid">
+            <div class="nw2-card">
+                <h2>🛡️ Status Geral</h2>
+                <p><strong>Bloqueador:</strong> <?php echo NW2_DEFAULT_DENY ? '✅ Ativo' : '❌ Inativo'; ?></p>
+                <p><strong>Scanner:</strong> <?php echo NW2_SCAN_PERMISSIONS ? '✅ Ativo' : '❌ Inativo'; ?></p>
+                <p><strong>Hardening:</strong> <?php echo NW2_AUTO_HARDEN_HTACCESS ? '✅ Ativo' : '❌ Inativo'; ?></p>
+                <p><strong>Monitor:</strong> <?php echo NW2_MONITOR_FILE_CHANGES ? '✅ Ativo' : '❌ Inativo'; ?></p>
+                <p><strong>Sanitização:</strong> <?php echo NW2_SANITIZE_UPLOADS ? '✅ Ativo' : '❌ Inativo'; ?></p>
+            </div>
+
+            <div class="nw2-card">
+                <h2>⚠️ Alertas Ativos</h2>
+                <?php if ($alerts['count'] > 0): ?>
+                    <div class="nw2-alerts-summary">
+                        <p><strong><?php echo $alerts['count']; ?> alerta(s) encontrado(s)</strong></p>
+                        <a href="?page=nw2-security-alerts" class="button button-primary">Ver Todos</a>
+                    </div>
+                <?php else: ?>
+                    <p class="nw2-success">✅ Nenhum alerta ativo</p>
+                <?php endif; ?>
+            </div>
+        </div>
+
+        <!-- Quick Actions -->
+        <div class="nw2-card">
+            <h2>⚡ Ações Rápidas</h2>
+            <form method="post">
+                <?php wp_nonce_field('nw2_actions', 'nw2_nonce'); ?>
+                <p>
+                    <button type="submit" name="nw2_scan_now" class="button button-primary">
+                        Executar Scanner Agora
+                    </button>
+                    <button type="submit" name="nw2_harden_now" class="button button-secondary">
+                        Aplicar Hardening .htaccess
+                    </button>
+                    <?php if ($alerts['count'] > 0): ?>
+                        <button type="submit" name="nw2_dismiss_all" class="button">
+                            Dispensar Todos os Alertas
+                        </button>
+                    <?php endif; ?>
+                </p>
+            </form>
+        </div>
+    </div>
+
+    <style>
+        .nw2-dashboard-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 20px; margin: 20px 0; }
+        .nw2-card { background: #fff; border: 1px solid #ccd0d4; padding: 20px; border-radius: 4px; }
+        .nw2-success { color: #46b450; font-weight: bold; }
+        .nw2-alerts-summary { background: #fff8e5; padding: 15px; border-radius: 4px; border-left: 4px solid #f0ad4e; }
+    </style>
+    <?php
+}
+
+function nw2_render_settings() {
+    ?>
+    <div class="wrap">
+        <h1>Configurações NW2 Security</h1>
+
+        <div class="nw2-card">
+            <h2>🔧 Configurações do Sistema</h2>
+            <p>Configure via <code>wp-config.php</code>:</p>
+            <pre style="background: #f5f5f5; padding: 15px; border-radius: 4px;">
+define('NW2_DEFAULT_DENY', true);           // Bloqueador de requisições
+define('NW2_SCAN_PERMISSIONS', true);       // Scanner de permissões
+define('NW2_AUTO_HARDEN_HTACCESS', true);   // Hardening .htaccess
+define('NW2_MONITOR_FILE_CHANGES', true);   // Monitor de arquivos
+define('NW2_SANITIZE_UPLOADS', true);       // Sanitização de uploads
+define('NW2_DEBUG_LOG', false);             // Log de debug (opcional)
+            </pre>
+
+            <p><strong>ATENÇÃO:</strong> Nunca defina <code>WP_HTTP_BLOCK_EXTERNAL=true</code> — este plugin usa sistema próprio.</p>
+        </div>
+    </div>
+    <?php
+}
+
+function nw2_render_alerts() {
+    $alerts = nw2_get_all_alerts();
+    ?>
+    <div class="wrap">
+        <h1>Alertas NW2 Security</h1>
+
+        <?php if (empty($alerts['alerts'])): ?>
+            <div class="nw2-card">
+                <p class="nw2-success">✅ Nenhum alerta ativo</p>
+            </div>
+        <?php else: ?>
+            <form method="post">
+                <?php wp_nonce_field('nw2_alerts', 'nw2_nonce'); ?>
+
+                <?php foreach ($alerts['alerts'] as $index => $alert): ?>
+                    <div class="nw2-card" style="border-left: 4px solid <?php echo $alert['severity'] === 'warning' ? '#f0ad4e' : '#d9534f'; ?>;">
+                        <h3><?php echo esc_html($alert['title']); ?></h3>
+                        <p><?php echo $alert['message']; ?></p>
+
+                        <?php if (!empty($alert['details'])): ?>
+                            <details style="margin-top: 10px;">
+                                <summary>Detalhes</summary>
+                                <ul style="margin-left: 20px; margin-top: 10px;">
+                                    <?php foreach ($alert['details'] as $detail): ?>
+                                        <li><?php
+                                            if (is_array($detail)) {
+                                                echo esc_html($detail['file'] ?? '');
+                                                if (isset($detail['current'])) {
+                                                    echo " (Atual: {$detail['current']} | Recomendado: {$detail['expected']})";
+                                                }
+                                            } else {
+                                                echo esc_html($detail);
+                                            }
+                                        ?></li>
+                                    <?php endforeach; ?>
+                                </ul>
+                            </details>
+                        <?php endif; ?>
+
+                        <?php if (!empty($alert['solution'])): ?>
+                            <div style="margin-top: 10px; padding: 10px; background: #e7f3ff; border-radius: 4px;">
+                                <strong>Solução:</strong><br><?php echo $alert['solution']; ?>
+                            </div>
+                        <?php endif; ?>
+
+                        <?php if ($alert['dismissible']): ?>
+                            <div style="margin-top: 15px;">
+                                <button type="submit" name="nw2_dismiss_alert" value="<?php echo esc_attr($alert['id']); ?>" class="button">
+                                    Não mostrar novamente
+                                </button>
+                            </div>
+                        <?php endif; ?>
+                    </div>
+                <?php endforeach; ?>
+
+                <div style="margin-top: 20px;">
+                    <button type="submit" name="nw2_dismiss_all_alerts" class="button button-primary">
+                        Dispensar Todos os Alertas
+                    </button>
+                </div>
+            </form>
+        <?php endif; ?>
+    </div>
+    <style>
+        .nw2-card { background: #fff; border: 1px solid #ccd0d4; padding: 20px; margin: 20px 0; border-radius: 4px; }
+    </style>
+    <?php
+}
+
+/* =============================================================================
+ * HANDLERS DE AÇÕES
+ * ========================================================================== */
 add_action('admin_init', function() {
     if (!current_user_can('manage_options')) return;
 
-    if (isset($_POST['nw2_scan_permissions']) && wp_verify_nonce($_POST['nw2_nonce'], 'nw2_security_actions')) {
-        $issues = nw2_scan_wordpress_permissions();
-        add_action('admin_notices', function() use ($issues) {
-            $count = count($issues);
-            echo '<div class="notice notice-success"><p>';
-            echo "<strong>Scanner executado:</strong> Encontrados {$count} problema(s).";
-            echo '</p></div>';
-        });
+    // Dismiss single alert
+    if (isset($_POST['nw2_dismiss_alert']) && wp_verify_nonce($_POST['nw2_nonce'], 'nw2_alerts')) {
+        $alert_id = sanitize_text_field($_POST['nw2_dismiss_alert']);
+        update_user_meta(get_current_user_id(), "nw2_hide_{$alert_id}_alert", true);
+        wp_redirect(admin_url('admin.php?page=nw2-security-alerts&dismissed=1'));
+        exit;
     }
 
-    if (isset($_POST['nw2_harden_htaccess']) && wp_verify_nonce($_POST['nw2_nonce'], 'nw2_security_actions')) {
-        $result = nw2_harden_htaccess();
-        add_action('admin_notices', function() use ($result) {
-            echo '<div class="notice notice-' . ($result ? 'success' : 'error') . '"><p>';
-            echo "<strong>Hardening .htaccess:</strong> " . ($result ? 'Aplicado com sucesso!' : 'Falha ao aplicar.');
-            echo '</p></div>';
-        });
+    // Dismiss all alerts
+    if (isset($_POST['nw2_dismiss_all_alerts']) && wp_verify_nonce($_POST['nw2_nonce'], 'nw2_alerts')) {
+        $alerts = ['curl_alert', 'permission_scan', 'file_changes'];
+        foreach ($alerts as $alert_id) {
+            update_user_meta(get_current_user_id(), "nw2_hide_{$alert_id}_alert", true);
+        }
+        wp_redirect(admin_url('admin.php?page=nw2-security-alerts&dismissed_all=1'));
+        exit;
     }
+
+    // Quick actions
+    if (isset($_POST['nw2_scan_now']) && wp_verify_nonce($_POST['nw2_nonce'], 'nw2_actions')) {
+        $issues = nw2_scan_wordpress_permissions();
+        set_transient('nw2_scan_result', count($issues), 300);
+        wp_redirect(admin_url('admin.php?page=nw2-security-dashboard&scanned=1'));
+        exit;
+    }
+
+    if (isset($_POST['nw2_harden_now']) && wp_verify_nonce($_POST['nw2_nonce'], 'nw2_actions')) {
+        $result = nw2_harden_htaccess();
+        set_transient('nw2_harden_result', $result ? 'success' : 'error', 300);
+        wp_redirect(admin_url('admin.php?page=nw2-security-dashboard&hardened=1'));
+        exit;
+    }
+
+    // Dismiss all from dashboard
+    if (isset($_POST['nw2_dismiss_all']) && wp_verify_nonce($_POST['nw2_nonce'], 'nw2_actions')) {
+        $alerts = ['curl_alert', 'permission_scan', 'file_changes'];
+        foreach ($alerts as $alert_id) {
+            update_user_meta(get_current_user_id(), "nw2_hide_{$alert_id}_alert", true);
+        }
+        wp_redirect(admin_url('admin.php?page=nw2-security-dashboard&dismissed_all=1'));
+        exit;
+    }
+});
+
+/* =============================================================================
+ * ADMIN NOTICE ÚNICO (LIMPO)
+ * ========================================================================== */
+add_action('admin_notices', function() {
+    $alerts = nw2_get_all_alerts();
+
+    // Se não há alertas ou usuário já viu todos, não mostra nada
+    if ($alerts['count'] === 0 || get_user_meta(get_current_user_id(), 'nw2_hide_all_alerts', true)) {
+        return;
+    }
+
+    // Apenas UM aviso limpo
+    ?>
+    <div class="notice notice-warning is-dismissible nw2-global-alert">
+        <p>
+            <strong>NW2 Security:</strong> Você tem <?php echo $alerts['count']; ?> alerta(s) de segurança.
+            <a href="<?php echo admin_url('admin.php?page=nw2-security-alerts'); ?>">Ver detalhes</a>
+            <button type="button" class="button-link nw2-dismiss-all" style="margin-left: 10px;">Dispensar todos</button>
+        </p>
+    </div>
+
+    <script>
+    jQuery(document).ready(function($) {
+        // Dismiss individual notice
+        $('.nw2-global-alert .notice-dismiss').on('click', function() {
+            $.post(ajaxurl, {
+                action: 'nw2_dismiss_notice',
+                nonce: '<?php echo wp_create_nonce('nw2_dismiss'); ?>'
+            });
+        });
+
+        // Dismiss all alerts
+        $('.nw2-dismiss-all').on('click', function() {
+            if (confirm('Dispensar todos os alertas de segurança?')) {
+                $.post(ajaxurl, {
+                    action: 'nw2_dismiss_all_alerts',
+                    nonce: '<?php echo wp_create_nonce('nw2_dismiss_all'); ?>'
+                }, function() {
+                    $('.nw2-global-alert').fadeOut();
+                });
+            }
+        });
+    });
+    </script>
+    <?php
+});
+
+// AJAX handlers
+add_action('wp_ajax_nw2_dismiss_notice', function() {
+    if (!wp_verify_nonce($_POST['nonce'], 'nw2_dismiss')) return;
+    update_user_meta(get_current_user_id(), 'nw2_hide_global_alert', true);
+    wp_die();
+});
+
+add_action('wp_ajax_nw2_dismiss_all_alerts', function() {
+    if (!wp_verify_nonce($_POST['nonce'], 'nw2_dismiss_all')) return;
+    update_user_meta(get_current_user_id(), 'nw2_hide_all_alerts', true);
+    wp_die();
 });
 
 /* =============================================================================
