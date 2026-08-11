@@ -1279,3 +1279,9 @@ add_action('wp_ajax_nw2_dismiss_all_alerts', function() {
 /* =============================================================================
  * FIM DO PLUGIN
  * ========================================================================== */
+
+if (!function_exists('nw2_security_version')) {
+    function nw2_security_version(): string {
+        return '3.1.8';
+    }
+}
