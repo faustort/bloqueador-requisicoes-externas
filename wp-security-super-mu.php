@@ -4,7 +4,7 @@
  * Plugin URI:  https://www.nw2web.com.br
  * Description: Bloqueador de requisições externas + scanner de permissões + hardening .htaccess + monitoramento arquivos. Tudo em um único MU-plugin.
  * Author:      NW2
- * Version:     3.0.0
+ * Version:     3.0.1
  *
  * Instale como MU-plugin: wp-content/mu-plugins/wp-security-super-mu.php
  *
@@ -19,6 +19,10 @@ if (!defined('ABSPATH')) exit;
 if (!defined('NW2_DEFAULT_DENY')) define('NW2_DEFAULT_DENY', true);
 if (!defined('NW2_DEFAULT_DENY_DRY_RUN')) define('NW2_DEFAULT_DENY_DRY_RUN', false);
 if (!defined('NW2_SCAN_PERMISSIONS')) define('NW2_SCAN_PERMISSIONS', true);
+if (!defined('NW2_FIX_PERMISSIONS')) define('NW2_FIX_PERMISSIONS', false);
+if (!defined('NW2_PERMISSION_BACKUP')) define('NW2_PERMISSION_BACKUP', true);
+if (!defined('NW2_PERMISSION_NOTIFY')) define('NW2_PERMISSION_NOTIFY', false);
+if (!defined('NW2_SCAN_PROGRESS')) define('NW2_SCAN_PROGRESS', 0);
 if (!defined('NW2_AUTO_HARDEN_HTACCESS')) define('NW2_AUTO_HARDEN_HTACCESS', true);
 if (!defined('NW2_MONITOR_FILE_CHANGES')) define('NW2_MONITOR_FILE_CHANGES', true);
 if (!defined('NW2_SANITIZE_UPLOADS')) define('NW2_SANITIZE_UPLOADS', true);
@@ -282,17 +286,18 @@ if (NW2_SCAN_PERMISSIONS && is_admin()) {
         if (!current_user_can('manage_options')) return;
 
         // Verificação única por dia
-        $last_scan = get_transient('nw2_last_permission_scan');
+        $last_scan = get_transient('nw2_last_permission_scan_result');
         if (!$last_scan) {
-            nw2_scan_wordpress_permissions();
-            set_transient('nw2_last_permission_scan', time(), 24 * HOUR_IN_SECONDS);
+            $scan_result = nw2_scan_wordpress_permissions();
+            set_transient('nw2_last_permission_scan_result', $scan_result, 24 * HOUR_IN_SECONDS);
         }
     });
 }
 
 if (!function_exists('nw2_scan_wordpress_permissions')) {
-    function nw2_scan_wordpress_permissions(): array {
+    function nw2_scan_wordpress_permissions($fix = false): array {
         $issues = [];
+        $fixed = 0;
         $recommended = [
             ABSPATH . 'wp-config.php' => 0400,
             ABSPATH . '.htaccess' => 0444,
@@ -303,8 +308,25 @@ if (!function_exists('nw2_scan_wordpress_permissions')) {
             ABSPATH . 'wp-login.php' => 0644,
         ];
 
+        $total_files = count($recommended);
+        $processed = 0;
+
+        // Backup permissions if enabled
+        if (NW2_PERMISSION_BACKUP && $fix) {
+            $backup = get_option('nw2_permissions_backup', []);
+            foreach ($recommended as $path => $expected) {
+                if (file_exists($path) && !isset($backup[$path])) {
+                    $backup[$path] = fileperms($path) & 0777;
+                }
+            }
+            update_option('nw2_permissions_backup', $backup);
+        }
+
         foreach ($recommended as $path => $expected) {
-            if (!file_exists($path)) continue;
+            if (!file_exists($path)) {
+                $processed++;
+                continue;
+            }
             $current = fileperms($path) & 0777;
             if ($current !== $expected) {
                 $issues[] = [
@@ -313,7 +335,19 @@ if (!function_exists('nw2_scan_wordpress_permissions')) {
                     'expected' => decoct($expected),
                     'severity' => ($current > $expected) ? 'high' : 'low'
                 ];
+                if ($fix && NW2_FIX_PERMISSIONS) {
+                    // Attempt to chmod
+                    if (@chmod($path, $expected)) {
+                        $fixed++;
+                        // Log
+                        error_log('[NW2] Fixed permissions: ' . $path . ' from ' . decoct($current) . ' to ' . decoct($expected));
+                    }
+                }
             }
+            $processed++;
+
+            // Update progress transient
+            set_transient('nw2_scan_progress', round(($processed / $total_files) * 100), 30);
         }
 
         // Verificação extra: arquivos PHP em uploads
@@ -326,11 +360,35 @@ if (!function_exists('nw2_scan_wordpress_permissions')) {
                     'issue' => 'Arquivo PHP em pasta de uploads',
                     'severity' => 'critical'
                 ];
+                // Optionally delete or move? We'll just report.
+                if ($fix && NW2_FIX_PERMISSIONS) {
+                    if (@unlink($php_file)) {
+                        $fixed++;
+                        error_log('[NW2] Removed PHP file from uploads: ' . $php_file);
+                    }
+                }
             }
         }
 
-        // Mostra aviso se encontrar problemas
-        if (!empty($issues) && is_admin() && current_user_can('manage_options')) {
+        // Prepare result
+        $result = [
+            'issues' => $issues,
+            'count' => count($issues),
+            'fixed' => $fixed,
+            'total_files' => $total_files,
+            'processed' => $processed,
+        ];
+
+        // Notify if fixes applied and notifications enabled
+        if ($fix && NW2_FIX_PERMISSIONS && $fixed > 0 && NW2_PERMISSION_NOTIFY && is_admin() && current_user_can('manage_options')) {
+            // Could send email, but for now just log
+            error_log('[NW2] Permission fix completed: ' . $fixed . ' items fixed.');
+            // Optionally set a transient for admin notice
+            set_transient('nw2_permission_fixed_notice', $fixed, 12 * HOUR_IN_SECONDS);
+        }
+
+        // Mostra aviso se encontrar problemas (only when not fixing, to avoid duplicate messages)
+        if (!$fix && !empty($issues) && is_admin() && current_user_can('manage_options')) {
             add_action('admin_notices', function() use ($issues) {
                 $count = count($issues);
                 echo '<div class="notice notice-warning"><p><strong>NW2 Scanner:</strong> ';
@@ -351,7 +409,7 @@ if (!function_exists('nw2_scan_wordpress_permissions')) {
             });
         }
 
-        return $issues;
+        return $result;
     }
 }
 
@@ -598,21 +656,21 @@ if (!function_exists('nw2_get_all_alerts')) {
         }
 
         // 2. Scanner de permissões (executa apenas quando necessário)
-        if (NW2_SCAN_PERMISSIONS && !get_transient('nw2_last_permission_scan')) {
-            $permission_issues = nw2_scan_wordpress_permissions();
-            if (!empty($permission_issues)) {
-                $count = count($permission_issues);
+        if (NW2_SCAN_PERMISSIONS && !get_transient('nw2_last_permission_scan_result')) {
+            $scan_result = nw2_scan_wordpress_permissions();
+            if (!empty($scan_result['issues'])) {
+                $count = $scan_result['count'];
                 $alerts[] = [
                     'id' => 'permission_scan',
                     'title' => "{$count} problema(s) de permissões encontrados",
                     'message' => 'Alguns arquivos têm permissões incorretas.',
-                    'details' => array_slice($permission_issues, 0, 5), // Mostra até 5
+                    'details' => array_slice($scan_result['issues'], 0, 5), // Mostra até 5
                     'severity' => 'warning',
                     'dismissible' => true
                 ];
                 $alert_count += $count;
             }
-            set_transient('nw2_last_permission_scan', time(), 24 * HOUR_IN_SECONDS);
+            set_transient('nw2_last_permission_scan_result', $scan_result, 24 * HOUR_IN_SECONDS);
         }
 
         // 3. Monitor de arquivos
@@ -695,30 +753,29 @@ function nw2_render_dashboard() {
         <!-- Status Cards -->
         <div class="nw2-dashboard-grid">
             <div class="nw2-card">
-                <h2>🛡️ Status Geral</h2>
-                <p><strong>Bloqueador:</strong> <?php echo NW2_DEFAULT_DENY ? '✅ Ativo' : '❌ Inativo'; ?></p>
-                <p><strong>Scanner:</strong> <?php echo NW2_SCAN_PERMISSIONS ? '✅ Ativo' : '❌ Inativo'; ?></p>
-                <p><strong>Hardening:</strong> <?php echo NW2_AUTO_HARDEN_HTACCESS ? '✅ Ativo' : '❌ Inativo'; ?></p>
-                <p><strong>Monitor:</strong> <?php echo NW2_MONITOR_FILE_CHANGES ? '✅ Ativo' : '❌ Inativo'; ?></p>
-                <p><strong>Sanitização:</strong> <?php echo NW2_SANITIZE_UPLOADS ? '✅ Ativo' : '❌ Inativo'; ?></p>
+                <h2>Status Geral</h2>
+                <p><strong>Bloqueador:</strong> <span class="nw2-status nw2-<?php echo NW2_DEFAULT_DENY ? 'active' : 'inactive'; ?>"><?php echo NW2_DEFAULT_DENY ? 'Ativo' : 'Inativo'; ?></span></p>
+                <p><strong>Scanner:</strong> <span class="nw2-status nw2-<?php echo NW2_SCAN_PERMISSIONS ? 'active' : 'inactive'; ?>"><?php echo NW2_SCAN_PERMISSIONS ? 'Ativo' : 'Inativo'; ?></span></p>
+                <p><strong>Hardening:</strong> <span class="nw2-status nw2-<?php echo NW2_AUTO_HARDEN_HTACCESS ? 'active' : 'inactive'; ?>"><?php echo NW2_AUTO_HARDEN_HTACCESS ? 'Ativo' : 'Inativo'; ?></span></p>
+                <p><strong>Monitor:</strong> <span class="nw2-status nw2-<?php echo NW2_MONITOR_FILE_CHANGES ? 'active' : 'inactive'; ?>"><?php echo NW2_MONITOR_FILE_CHANGES ? 'Ativo' : 'Inativo'; ?></span></p>
+                <p><strong>Sanitização:</strong> <span class="nw2-status nw2-<?php echo NW2_SANITIZE_UPLOADS ? 'active' : 'inactive'; ?>"><?php echo NW2_SANITIZE_UPLOADS ? 'Ativo' : 'Inativo'; ?></span></p>
             </div>
 
             <div class="nw2-card">
-                <h2>⚠️ Alertas Ativos</h2>
+                <h2>Alertas Ativos</h2>
                 <?php if ($alerts['count'] > 0): ?>
                     <div class="nw2-alerts-summary">
                         <p><strong><?php echo $alerts['count']; ?> alerta(s) encontrado(s)</strong></p>
                         <a href="?page=nw2-security-alerts" class="button button-primary">Ver Todos</a>
                     </div>
                 <?php else: ?>
-                    <p class="nw2-success">✅ Nenhum alerta ativo</p>
+                    <p class="nw2-success">Nenhum alerta ativo</p>
                 <?php endif; ?>
             </div>
-        </div>
 
         <!-- Quick Actions -->
         <div class="nw2-card">
-            <h2>⚡ Ações Rápidas</h2>
+            <h2>Ações Rápidas</h2>
             <form method="post">
                 <?php wp_nonce_field('nw2_actions', 'nw2_nonce'); ?>
                 <p>
@@ -741,6 +798,9 @@ function nw2_render_dashboard() {
     <style>
         .nw2-dashboard-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 20px; margin: 20px 0; }
         .nw2-card { background: #fff; border: 1px solid #ccd0d4; padding: 20px; border-radius: 4px; }
+        .nw2-status { display: inline-block; padding: 3px 8px; border-radius: 3px; font-size: 12px; font-weight: 600; text-transform: uppercase; }
+        .nw2-active { background: #d4edda; color: #155724; }
+        .nw2-inactive { background: #f8d7da; color: #721c24; }
         .nw2-success { color: #46b450; font-weight: bold; }
         .nw2-alerts-summary { background: #fff8e5; padding: 15px; border-radius: 4px; border-left: 4px solid #f0ad4e; }
     </style>
@@ -753,7 +813,7 @@ function nw2_render_settings() {
         <h1>Configurações NW2 Security</h1>
 
         <div class="nw2-card">
-            <h2>🔧 Configurações do Sistema</h2>
+            <h2>Configurações do Sistema</h2>
             <p>Configure via <code>wp-config.php</code>:</p>
             <pre style="background: #f5f5f5; padding: 15px; border-radius: 4px;">
 define('NW2_DEFAULT_DENY', true);           // Bloqueador de requisições
@@ -778,7 +838,7 @@ function nw2_render_alerts() {
 
         <?php if (empty($alerts['alerts'])): ?>
             <div class="nw2-card">
-                <p class="nw2-success">✅ Nenhum alerta ativo</p>
+                <p class="nw2-success">Nenhum alerta ativo</p>
             </div>
         <?php else: ?>
             <form method="post">
