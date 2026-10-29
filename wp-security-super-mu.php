@@ -4,7 +4,7 @@
  * Plugin URI:  https://www.nw2web.com.br
  * Description: Substituto leve do Sucuri: Bloqueador de requisições externas (100% amigável ao WordPress e Google) + Stub total Elementor + Limpeza total do Dashboard WP + WAF anti-enumeração + Scanner de permissões + Hardening .htaccess + Sanitização de uploads.
  * Author:      NW2
- * Version:     3.2.0
+ * Version:     3.2.1
  *
  * Instale como MU-plugin: wp-content/mu-plugins/wp-security-super-mu.php
  *
@@ -20,10 +20,11 @@ if (!defined('NW2_DEFAULT_DENY')) define('NW2_DEFAULT_DENY', true);
 if (!defined('NW2_DEFAULT_DENY_DRY_RUN')) define('NW2_DEFAULT_DENY_DRY_RUN', false);
 if (!defined('NW2_DEBUG_BLOCKED_HOSTS')) define('NW2_DEBUG_BLOCKED_HOSTS', false);
 if (!defined('NW2_DISABLE_CURL')) define('NW2_DISABLE_CURL', true);
+if (!defined('NW2_ALERT_CURL_EXEC')) define('NW2_ALERT_CURL_EXEC', false);
 if (!defined('NW2_SCAN_PERMISSIONS')) define('NW2_SCAN_PERMISSIONS', true);
 if (!defined('NW2_MAX_LOG_AGE_DAYS')) define('NW2_MAX_LOG_AGE_DAYS', 90);
 if (!defined('NW2_MAX_HTACCESS_BACKUPS')) define('NW2_MAX_HTACCESS_BACKUPS', 25);
-if (!defined('NW2_FIX_PERMISSIONS')) define('NW2_FIX_PERMISSIONS', false);
+if (!defined('NW2_FIX_PERMISSIONS')) define('NW2_FIX_PERMISSIONS', true);
 if (!defined('NW2_PERMISSION_BACKUP')) define('NW2_PERMISSION_BACKUP', true);
 if (!defined('NW2_PERMISSION_NOTIFY')) define('NW2_PERMISSION_NOTIFY', false);
 if (!defined('NW2_AUTO_HARDEN_HTACCESS')) define('NW2_AUTO_HARDEN_HTACCESS', true);
@@ -367,6 +368,13 @@ if (NW2_CLEAN_DASHBOARD) {
         </style>
         <?php
     });
+
+    // Remove aviso global ruidoso de past-due do Action Scheduler no topo do wp-admin
+    add_action('admin_init', function () {
+        if (class_exists('ActionScheduler_AdminView')) {
+            remove_action('admin_notices', [ActionScheduler_AdminView::instance(), 'check_past_due_actions']);
+        }
+    }, 99);
 }
 
 /* =============================================================================
@@ -406,7 +414,7 @@ if (NW2_SCAN_PERMISSIONS && is_admin()) {
         // Verificação única por dia
         $last_scan = get_transient('nw2_last_permission_scan_result');
         if ($last_scan === false) {
-            $scan_result = nw2_scan_wordpress_permissions();
+            $scan_result = nw2_scan_wordpress_permissions(NW2_FIX_PERMISSIONS);
             set_transient('nw2_last_permission_scan_result', $scan_result, 24 * HOUR_IN_SECONDS);
         }
     });
@@ -417,13 +425,13 @@ if (!function_exists('nw2_scan_wordpress_permissions')) {
         $issues = [];
         $fixed = 0;
         $recommended = [
-            ABSPATH . 'wp-config.php' => 0400,
-            ABSPATH . '.htaccess' => 0444,
-            ABSPATH . 'wp-content/uploads' => 0755,
-            ABSPATH . 'wp-content/plugins' => 0755,
-            ABSPATH . 'wp-content/themes' => 0755,
-            ABSPATH . 'index.php' => 0644,
-            ABSPATH . 'wp-login.php' => 0644,
+            ABSPATH . 'wp-config.php' => ['target' => 0600, 'allowed' => [0400, 0440, 0600]],
+            ABSPATH . '.htaccess' => ['target' => 0644, 'allowed' => [0444, 0644]],
+            ABSPATH . 'wp-content/uploads' => ['target' => 0755, 'allowed' => [0755]],
+            ABSPATH . 'wp-content/plugins' => ['target' => 0755, 'allowed' => [0755]],
+            ABSPATH . 'wp-content/themes' => ['target' => 0755, 'allowed' => [0755]],
+            ABSPATH . 'index.php' => ['target' => 0644, 'allowed' => [0444, 0644]],
+            ABSPATH . 'wp-login.php' => ['target' => 0644, 'allowed' => [0444, 0644]],
         ];
 
         $total_files = count($recommended);
@@ -431,7 +439,7 @@ if (!function_exists('nw2_scan_wordpress_permissions')) {
 
         if (NW2_PERMISSION_BACKUP && $fix) {
             $backup = get_option('nw2_permissions_backup', []);
-            foreach ($recommended as $path => $expected) {
+            foreach ($recommended as $path => $rule) {
                 if (file_exists($path) && !isset($backup[$path])) {
                     $backup[$path] = fileperms($path) & 0777;
                 }
@@ -439,26 +447,27 @@ if (!function_exists('nw2_scan_wordpress_permissions')) {
             update_option('nw2_permissions_backup', $backup);
         }
 
-        foreach ($recommended as $path => $expected) {
+        foreach ($recommended as $path => $rule) {
             if (!file_exists($path)) {
                 $processed++;
                 continue;
             }
+            $expected = $rule['target'];
+            $allowed = $rule['allowed'];
             $current = fileperms($path) & 0777;
-            if ($current !== $expected) {
-                $issues[] = [
-                    'file' => $path,
-                    'current' => decoct($current),
-                    'expected' => decoct($expected),
-                    'severity' => ($current > $expected) ? 'high' : 'low'
-                ];
-                if ($fix && NW2_FIX_PERMISSIONS) {
-                    if (@chmod($path, $expected)) {
-                        $fixed++;
-                        error_log('[NW2] Fixed permissions: ' . $path . ' from ' . decoct($current) . ' to ' . decoct($expected));
-                    } else {
-                        error_log('[NW2] Failed to fix permissions: ' . $path);
-                    }
+            if (!in_array($current, $allowed, true)) {
+                if ($fix && NW2_FIX_PERMISSIONS && @chmod($path, $expected)) {
+                    $fixed++;
+                    clearstatcache(true, $path);
+                    $current = fileperms($path) & 0777;
+                }
+                if (!in_array($current, $allowed, true)) {
+                    $issues[] = [
+                        'file' => $path,
+                        'current' => decoct($current),
+                        'expected' => decoct($expected),
+                        'severity' => ($current > $expected) ? 'high' : 'low'
+                    ];
                 }
             }
             $processed++;
@@ -638,7 +647,15 @@ if (!function_exists('nw2_harden_htaccess')) {
             error_log('[NW2] .htaccess não é gravável.');
             return false;
         }
-        return file_put_contents($htaccess_path, $new_content) !== false;
+        $written = file_put_contents($htaccess_path, $new_content) !== false;
+        if ($written) {
+            $hashes = get_option('nw2_file_hashes', []);
+            if (is_array($hashes)) {
+                $hashes[$htaccess_path] = md5_file($htaccess_path);
+                update_option('nw2_file_hashes', $hashes);
+            }
+        }
+        return $written;
     }
 }
 
@@ -878,8 +895,8 @@ if (!function_exists('nw2_get_all_alerts')) {
             return ['alerts' => [], 'count' => 0, 'timestamp' => time()];
         }
 
-        // 1. Alerta sobre curl_exec
-        if (function_exists('curl_exec') && !get_user_meta($user_id, 'nw2_hide_curl_alert', true)) {
+        // 1. Alerta sobre curl_exec (apenas se NW2_ALERT_CURL_EXEC estiver explicitamente ativo)
+        if (NW2_ALERT_CURL_EXEC && function_exists('curl_exec') && !get_user_meta($user_id, 'nw2_hide_curl_alert', true)) {
             $alerts[] = [
                 'id' => 'curl_alert',
                 'title' => 'Função PHP curl_exec habilitada',
@@ -895,7 +912,7 @@ if (!function_exists('nw2_get_all_alerts')) {
         if (NW2_SCAN_PERMISSIONS && !get_user_meta($user_id, 'nw2_hide_permission_scan_alert', true)) {
             $scan_result = get_transient('nw2_last_permission_scan_result');
             if ($scan_result === false) {
-                $scan_result = nw2_scan_wordpress_permissions();
+                $scan_result = nw2_scan_wordpress_permissions(NW2_FIX_PERMISSIONS);
                 set_transient('nw2_last_permission_scan_result', $scan_result, 24 * HOUR_IN_SECONDS);
             }
             if (is_array($scan_result) && !empty($scan_result['issues'])) {
@@ -1278,7 +1295,7 @@ add_action('admin_init', function() {
 
     // Quick actions
     if (isset($_POST['nw2_scan_now']) && wp_verify_nonce($_POST['nw2_nonce'] ?? '', 'nw2_actions')) {
-        $scan_result = nw2_scan_wordpress_permissions();
+        $scan_result = nw2_scan_wordpress_permissions(NW2_FIX_PERMISSIONS);
         set_transient('nw2_last_permission_scan_result', $scan_result, 24 * HOUR_IN_SECONDS);
         set_transient('nw2_scan_result', $scan_result['count'], 300);
         wp_safe_redirect(admin_url('admin.php?page=nw2-security-dashboard&scanned=1'));
@@ -1380,6 +1397,6 @@ add_action('wp_ajax_nw2_dismiss_all_alerts', function() {
 
 if (!function_exists('nw2_security_version')) {
     function nw2_security_version(): string {
-        return '3.2.0';
+        return '3.2.1';
     }
 }
